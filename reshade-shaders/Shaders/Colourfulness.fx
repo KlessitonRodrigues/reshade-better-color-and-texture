@@ -32,13 +32,6 @@ uniform float colourfulness <
 	ui_step = 0.01;
 > = 0.4;
 
-uniform float lim_luma <
-	ui_type = "slider";
-	ui_min = 0.1; ui_max = 1.0;
-	ui_tooltip = "Lower values allows for more change near clipping";
-	ui_step = 0.01;
-> = 0.7;
-
 //-------------------------------------------------------------------------------------------------
 #ifndef fast_luma
 	#define fast_luma 1 // Rapid approx of sRGB gamma, small difference in quality
@@ -87,7 +80,7 @@ float3 Colourfulness(float4 vpos : SV_Position, float2 tex : TEXCOORD) : SV_Targ
 		const float3 diffmax = diff_luma*min(min(poslim, neglim), 32) - diff_luma;
 
 		// Soft limit diff
-		c_diff = soft_lim( c_diff, max(wpmean(diffmax, rlc_diff, lim_luma), 1e-6) );
+		c_diff = soft_lim( c_diff, max(rlc_diff, 1e-6) );
 	}
 
 	return saturate(c0 + c_diff);
