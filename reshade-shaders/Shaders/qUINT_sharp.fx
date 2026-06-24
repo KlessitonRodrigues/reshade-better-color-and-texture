@@ -315,18 +315,22 @@ void PS_Sharp(in VSOUT i, out float3 o : SV_Target0)
     [branch]
     if(RMS_MASK_ENABLE)
     {
-        float3 mean = (corners + neighbours + center) / 9.0;
-        float3 RMS = (mean - A) * (mean - A);
-        RMS += (mean - B) * (mean - B);
-        RMS += (mean - C) * (mean - C);
-        RMS += (mean - D) * (mean - D);
-        RMS += (mean - E) * (mean - E);
-        RMS += (mean - F) * (mean - F);
-        RMS += (mean - G) * (mean - G);
-        RMS += (mean - H) * (mean - H);
-        RMS += (mean - I) * (mean - I);
+        float lA = color_to_lum(A), lB = color_to_lum(B), lC = color_to_lum(C);
+        float lD = color_to_lum(D), lE = color_to_lum(E), lF = color_to_lum(F);
+        float lG = color_to_lum(G), lH = color_to_lum(H), lI = color_to_lum(I);
 
-        sharpen *= rsqrt(RMS + 0.001) * 0.1;
+        float lmean = (lA + lB + lC + lD + lE + lF + lG + lH + lI) / 9.0;
+        float lRMS  = (lmean - lA) * (lmean - lA)
+                    + (lmean - lB) * (lmean - lB)
+                    + (lmean - lC) * (lmean - lC)
+                    + (lmean - lD) * (lmean - lD)
+                    + (lmean - lE) * (lmean - lE)
+                    + (lmean - lF) * (lmean - lF)
+                    + (lmean - lG) * (lmean - lG)
+                    + (lmean - lH) * (lmean - lH)
+                    + (lmean - lI) * (lmean - lI);
+
+        sharpen *= rsqrt(lRMS + 0.001) * 0.1;
     }
 
     sharpen = color_to_lum(sharpen);
