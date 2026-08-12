@@ -1,4 +1,4 @@
-## ReShade Preset: Better Color and Texture
+## ReShade Preset: Better Colors and Texture
 
 This preset improves color, shadows, texture detail, and sharpness in supported games.
 
@@ -37,7 +37,7 @@ Below, each pair is compared by timestamp. In each pair, the earlier shot is tre
     ![Fallout 4 ON - 2026-06-24 15:02:07](https://reshade-images.s3.us-east-1.amazonaws.com/Fallout4+2026-06-24+15-02-07.png)
   - Comparison: ON shows stronger contrast, richer color, and clearer texture definition.
 - **Pair 2**
-  - OFF (2026-08-12 11:33:45)
+  - OFF
     ![Fallout 4 OFF - 2026-08-12 11:33:45](https://reshade-images.s3.us-east-1.amazonaws.com/Fallout4+2026-08-12+11-33-45.png)
   - ON
     ![Fallout 4 ON - 2026-08-12 11:33:54](https://reshade-images.s3.us-east-1.amazonaws.com/Fallout4+2026-08-12+11-33-54.png)
