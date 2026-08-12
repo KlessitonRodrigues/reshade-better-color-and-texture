@@ -15,7 +15,7 @@ This preset improves color, shadows, texture detail, and sharpness in supported 
 ### 2) Download this preset as ZIP from GitHub
 
 1. Open this repository on GitHub.
-2. Click **Code** > **Download ZIP**.
+2. Click **Code** > **Download ZIP** above.
 3. Extract the ZIP on your computer.
 
 ### 3) Copy preset files to the game folder
