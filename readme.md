@@ -24,6 +24,11 @@ This preset improves color, shadows, texture detail, and sharpness in supported 
 2. Copy the preset files (such as `ReShadePreset.ini` and related files/folders) to the same folder as the game executable.
 3. Launch the game and open the ReShade menu (default key is usually `Home`) to load the preset.
 
+## Videos
+
+- [Watch Dogs video](https://youtu.be/9CZt-tkJ0gY)
+- [The Witcher 3 video](https://youtu.be/tu1LvzgK_9M)
+
 ## Showcase (Filter OFF/ON by shot date)
 
 Below, each pair is compared by timestamp. In each pair, the earlier shot is treated as OFF and the later shot as ON.
