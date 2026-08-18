@@ -29,9 +29,7 @@ This preset improves color, shadows, texture detail, and sharpness in supported 
 - [Watch Dogs video](https://youtu.be/9CZt-tkJ0gY)
 - [The Witcher 3 video](https://youtu.be/tu1LvzgK_9M)
 
-## Showcase (Filter OFF/ON by shot date)
-
-Below, each pair is compared by timestamp. In each pair, the earlier shot is treated as OFF and the later shot as ON.
+## Showcase
 
 ### Fallout 4
 
