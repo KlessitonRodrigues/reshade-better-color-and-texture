@@ -34,64 +34,35 @@ This preset improves color, shadows, texture detail, and sharpness in supported 
 ### Fallout 4
 
 - **Pair 1**
-  - OFF
-    ![Fallout 4 OFF - 2026-06-24 15:01:53](https://reshade-images.s3.us-east-1.amazonaws.com/Fallout4+2026-06-24+15-01-53.png)
-  - ON
-    ![Fallout 4 ON - 2026-06-24 15:02:07](https://reshade-images.s3.us-east-1.amazonaws.com/Fallout4+2026-06-24+15-02-07.png)
-  - Comparison: ON shows stronger contrast, richer color, and clearer texture definition.
+  - ![Fallout 4 OFF - 2026-06-24 15:01:53](https://reshade-images.s3.us-east-1.amazonaws.com/Fallout4+2026-06-24+15-01-53.png)
+  - ![Fallout 4 ON - 2026-06-24 15:02:07](https://reshade-images.s3.us-east-1.amazonaws.com/Fallout4+2026-06-24+15-02-07.png)
 - **Pair 2**
-  - OFF
-    ![Fallout 4 OFF - 2026-08-12 11:33:45](https://reshade-images.s3.us-east-1.amazonaws.com/Fallout4+2026-08-12+11-33-45.png)
-  - ON
-    ![Fallout 4 ON - 2026-08-12 11:33:54](https://reshade-images.s3.us-east-1.amazonaws.com/Fallout4+2026-08-12+11-33-54.png)
-  - Comparison: ON improves shadow separation and sharpness while keeping scene detail more readable.
+  - ![Fallout 4 OFF - 2026-08-12 11:33:45](https://reshade-images.s3.us-east-1.amazonaws.com/Fallout4+2026-08-12+11-33-45.png)
+  - ![Fallout 4 ON - 2026-08-12 11:33:54](https://reshade-images.s3.us-east-1.amazonaws.com/Fallout4+2026-08-12+11-33-54.png)
 
 ### Watch Dogs
 
 - **Pair 1**
-  - OFF
-    ![Watch Dogs OFF - 2026-08-12 11:02:59](https://reshade-images.s3.us-east-1.amazonaws.com/Watch_Dogs+2026-08-12+11-04-13.png)
-
-  - ON
-    ![Watch Dogs ON - 2026-08-12 11:04:13](https://reshade-images.s3.us-east-1.amazonaws.com/Watch_Dogs+2026-08-12+11-02-59.png)
-  - Comparison: ON adds cleaner highlights and better micro-contrast on surfaces.
-
+  - ![Watch Dogs OFF - 2026-08-12 11:02:59](https://reshade-images.s3.us-east-1.amazonaws.com/Watch_Dogs+2026-08-12+11-04-13.png)
+  - ![Watch Dogs ON - 2026-08-12 11:04:13](https://reshade-images.s3.us-east-1.amazonaws.com/Watch_Dogs+2026-08-12+11-02-59.png)
 - **Pair 2**
-  - OFF
-    ![Watch Dogs OFF - 2026-08-12 11:07:42](https://reshade-images.s3.us-east-1.amazonaws.com/Watch_Dogs+2026-08-12+11-07-42.png)
-  - ON
-    ![Watch Dogs ON - 2026-08-12 11:07:46](https://reshade-images.s3.us-east-1.amazonaws.com/Watch_Dogs+2026-08-12+11-07-46.png)
-  - Comparison: ON brings stronger depth in shadows and a sharper overall image.
+  - ![Watch Dogs OFF - 2026-08-12 11:07:42](https://reshade-images.s3.us-east-1.amazonaws.com/Watch_Dogs+2026-08-12+11-07-42.png)
+  - ![Watch Dogs ON - 2026-08-12 11:07:46](https://reshade-images.s3.us-east-1.amazonaws.com/Watch_Dogs+2026-08-12+11-07-46.png)
 - **Pair 3**
-  - OFF
-    ![Watch Dogs OFF - 2026-08-12 11:08:39](https://reshade-images.s3.us-east-1.amazonaws.com/Watch_Dogs+2026-08-12+11-08-39.png)
-  - ON
-    ![Watch Dogs ON - 2026-08-12 11:08:45](https://reshade-images.s3.us-east-1.amazonaws.com/Watch_Dogs+2026-08-12+11-08-45.png)
-  - Comparison: ON better color vibrancy and contrast.
+  - ![Watch Dogs OFF - 2026-08-12 11:08:39](https://reshade-images.s3.us-east-1.amazonaws.com/Watch_Dogs+2026-08-12+11-08-39.png)
+  - ![Watch Dogs ON - 2026-08-12 11:08:45](https://reshade-images.s3.us-east-1.amazonaws.com/Watch_Dogs+2026-08-12+11-08-45.png)
 - **Pair 4**
-  - OFF
-    ![Watch Dogs OFF - 2026-08-12 11:08:39](https://reshade-images.s3.us-east-1.amazonaws.com/Watch_Dogs+2026-08-12+11-14-16.png)
-  - ON
-    ![Watch Dogs ON - 2026-08-12 11:08:45](https://reshade-images.s3.us-east-1.amazonaws.com/Watch_Dogs+2026-08-12+11-14-20.png)
-  - Comparison: ON increases edge clarity and color richness without overbrightening.
+  - ![Watch Dogs OFF - 2026-08-12 11:08:39](https://reshade-images.s3.us-east-1.amazonaws.com/Watch_Dogs+2026-08-12+11-14-16.png)
+  - ![Watch Dogs ON - 2026-08-12 11:08:45](https://reshade-images.s3.us-east-1.amazonaws.com/Watch_Dogs+2026-08-12+11-14-20.png)
 
 ### The Witcher 3
 
 - **Pair 1**
-  - OFF
-    ![The Witcher 3 OFF - 2026-08-12 11:24:02](https://reshade-images.s3.us-east-1.amazonaws.com/witcher3+2026-08-12+11-24-02.png)
-  - ON
-    ![The Witcher 3 ON - 2026-08-12 11:25:21](https://reshade-images.s3.us-east-1.amazonaws.com/witcher3+2026-08-12+11-24-07.png)
-  - Comparison: ON has fuller color grading and better texture pop in mid-distance details.
+  - ![The Witcher 3 OFF - 2026-08-12 11:24:02](https://reshade-images.s3.us-east-1.amazonaws.com/witcher3+2026-08-12+11-24-02.png)
+  - ![The Witcher 3 ON - 2026-08-12 11:25:21](https://reshade-images.s3.us-east-1.amazonaws.com/witcher3+2026-08-12+11-24-07.png)
 - **Pair 2**
-  - OFF
-    ![The Witcher 3 OFF - 2026-08-12 11:26:10](https://reshade-images.s3.us-east-1.amazonaws.com/witcher3+2026-08-12+11-26-10.png)
-  - ON
-    ![The Witcher 3 ON - 2026-08-12 11:26:10](https://reshade-images.s3.us-east-1.amazonaws.com/witcher3+2026-08-12+11-26-18.png)
-  - Comparison: ON improves local contrast and adds crispness to vegetation and armor textures.
+  - ![The Witcher 3 OFF - 2026-08-12 11:26:10](https://reshade-images.s3.us-east-1.amazonaws.com/witcher3+2026-08-12+11-26-10.png)
+  - ![The Witcher 3 ON - 2026-08-12 11:26:10](https://reshade-images.s3.us-east-1.amazonaws.com/witcher3+2026-08-12+11-26-18.png)
 - **Pair 3**
-  - OFF
-    ![The Witcher 3 OFF - 2026-08-12 11:26:10](https://reshade-images.s3.us-east-1.amazonaws.com/witcher3+2026-08-12+11-20-54.png)
-  - ON
-    ![The Witcher 3 ON - 2026-08-12 11:26:10](https://reshade-images.s3.us-east-1.amazonaws.com/witcher3+2026-08-12+11-20-59.png)
-  - Comparison: ON light and shadow contrast is enhanced.
+  - ![The Witcher 3 OFF - 2026-08-12 11:26:10](https://reshade-images.s3.us-east-1.amazonaws.com/witcher3+2026-08-12+11-20-54.png)
+  - ![The Witcher 3 ON - 2026-08-12 11:26:10](https://reshade-images.s3.us-east-1.amazonaws.com/witcher3+2026-08-12+11-20-59.png)
