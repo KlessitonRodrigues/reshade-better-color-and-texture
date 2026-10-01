@@ -1,0 +1,36 @@
+name: Release ZIP
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set release variables
+        id: vars
+        run: |
+          tag="v${GITHUB_RUN_NUMBER}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "zip_name=reshade-better-color-and-texture-${tag}.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Create ZIP archive
+        run: |
+          zip -r "${{ steps.vars.outputs.zip_name }}" . \
+            -x ".git/*" \
+            -x ".github/*"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.tag }}
+          name: ${{ steps.vars.outputs.tag }}
+          files: ${{ steps.vars.outputs.zip_name }}
