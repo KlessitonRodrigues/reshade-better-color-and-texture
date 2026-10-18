@@ -34,3 +34,4 @@ jobs:
           tag_name: ${{ steps.vars.outputs.tag }}
           name: ${{ steps.vars.outputs.tag }}
           files: ${{ steps.vars.outputs.zip_name }}
+          body: "Release ${{ steps.vars.outputs.tag }}"
