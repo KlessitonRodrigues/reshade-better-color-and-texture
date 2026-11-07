@@ -1,6 +1,10 @@
 # AGENTS.md
 
 Guidance for agents working in this repository.
+File convention: <parent_folder>.<file_name>.ts
+Keep agents.md and readme.md up to date on change project structure
+Commit small changes using "feat/update/fix/refactor/remove:<short_description>"
+Push commits is always manual
 
 ## Project Overview
 
