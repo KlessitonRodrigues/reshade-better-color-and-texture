@@ -1,16 +1,21 @@
 /*
  * Performance HUD - ReShade add-on
  *
- * Shows CPU and GPU usage plus power draw on ReShade's always-visible
- * on-screen display (OSD).
+ * Shows CPU/GPU usage, power draw, temperature, VRAM usage, FPS and 1%/0.1%
+ * low frame-rate stats on ReShade's always-visible on-screen display (OSD).
  *
  * Data sources:
  *  - CPU usage:      GetSystemTimes (kernel/user time deltas)
  *  - CPU power:      PDH counter \Processor Information(_Total)\Package Power
  *                    (only shown when the system provides the counter)
+ *  - CPU temp:       PDH counter \Processor Information(_Total)\Temperature
+ *                    Data (Kelvin or tenths-of-Kelvin, converted to Celsius)
  *  - GPU usage:      NVML (NVIDIA) with PDH \GPU Engine(*)\Utilization
  *                    Percentage fallback (what Task Manager uses, Windows 10+)
  *  - GPU power/temp: NVML only (vendor SDK access is required for AMD/Intel)
+ *  - VRAM usage:     NVML \c nvmlDeviceGetMemoryInfo with a PDH
+ *                    \GPU Adapter Memory(*)\Dedicated Usage fallback
+ *  - FPS/percent low: derived from swapchain present times (rolling history)
  *
  * Copyright (C) 2026 reshade-better-color-and-texture contributors
  * SPDX-License-Identifier: BSD-3-Clause OR MIT
@@ -23,6 +28,7 @@
 #include <pdh.h>
 #include <pdhmsg.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
@@ -58,9 +64,12 @@ struct GpuSample
 	float usage;
 	float power;
 	int   temp;
+	float vram_used_gb;       // dedicated video memory used
+	float vram_total_gb;
 	bool  usage_valid;
 	bool  power_valid;
 	bool  temp_valid;
+	bool  vram_valid;
 };
 
 struct StatsSnapshot
@@ -69,8 +78,12 @@ struct StatsSnapshot
 	float cpu_usage;          // percent 0-100
 	bool  cpu_power_valid;
 	float cpu_power;          // watts
+	bool  cpu_temp_valid;
+	float cpu_temp;           // degrees celsius
 	bool  gpu_fallback_valid; // PDH GPU Engine counters are in use
 	float gpu_fallback_usage; // percent 0-100
+	bool  gpu_fallback_vram_valid;
+	float gpu_fallback_vram_usage; // gigabytes
 	bool  has_nvidia;
 	int   gpu_count;
 	GpuSample gpus[kMaxGpus];
@@ -83,8 +96,14 @@ static SRWLOCK g_snapshot_lock = SRWLOCK_INIT;
 
 static bool g_show_cpu_usage = true;
 static bool g_show_gpu_usage = true;
+static bool g_show_cpu_temp = true;
 static bool g_show_temp = true;
 static bool g_show_power = true;
+static bool g_show_vram = true;
+static bool g_show_fps = true;
+static float g_hud_scale = 1.0f;          // font scale of the OSD text
+static float g_hud_color[4] = { 0.88f, 0.88f, 0.88f, 1.0f };
+static bool g_use_threshold_colors = true; // color usage lines by load level
 static std::atomic<uint32_t> g_interval_ms { 1000 };
 
 // --------------------------------------------------------------- NVML
@@ -95,6 +114,7 @@ namespace nvml
 	constexpr int NVML_TEMPERATURE_GPU = 0;
 
 	struct Utilization { uint32_t gpu; uint32_t memory; };
+	struct MemoryInfo { uint64_t total_kib; uint64_t free_kib; uint64_t used_kib; };
 
 	using Init_t =            int (*)();
 	using Shutdown_t =        int (*)();
@@ -105,6 +125,7 @@ namespace nvml
 	using DeviceGetPower_t =  int (*)(void *, uint32_t *);
 	using DeviceGetTemp_t =   int (*)(void *, int, uint32_t *);
 	using DeviceGetEnergy_t = int (*)(void *, uint64_t *);
+	using DeviceGetMemInfo_t = int (*)(void *, MemoryInfo *);
 
 	static HMODULE module = nullptr;
 	static Init_t init = nullptr;
@@ -116,6 +137,7 @@ namespace nvml
 	static DeviceGetPower_t device_get_power = nullptr;
 	static DeviceGetTemp_t device_get_temp = nullptr;
 	static DeviceGetEnergy_t device_get_energy = nullptr;
+	static DeviceGetMemInfo_t device_get_mem_info = nullptr;
 }
 
 static void *g_nvml_devices[kMaxGpus] = { nullptr };
@@ -177,6 +199,7 @@ static void load_nvml()
 	NVML_PROC("nvmlDeviceGetPowerUsage", nvml::device_get_power, nvml::DeviceGetPower_t);
 	NVML_PROC("nvmlDeviceGetTemperature", nvml::device_get_temp, nvml::DeviceGetTemp_t);
 	NVML_PROC("nvmlDeviceGetTotalEnergyConsumption", nvml::device_get_energy, nvml::DeviceGetEnergy_t);
+	NVML_PROC("nvmlDeviceGetMemoryInfo", nvml::device_get_mem_info, nvml::DeviceGetMemInfo_t);
 #undef NVML_PROC
 
 	if (nvml::init == nullptr || nvml::device_get_count == nullptr || nvml::device_get_handle == nullptr ||
@@ -217,8 +240,12 @@ static void load_nvml()
 static PDH_HQUERY g_pdh_query = nullptr;
 static PDH_HCOUNTER g_pdh_cpu_power_counter = nullptr;
 static bool g_pdh_cpu_power_available = false;
+static PDH_HCOUNTER g_pdh_cpu_temp_counter = nullptr;
+static bool g_pdh_cpu_temp_available = false;
 static PDH_HCOUNTER g_pdh_gpu_counter = nullptr;
 static bool g_pdh_gpu_available = false;
+static PDH_HCOUNTER g_pdh_gpu_mem_counter = nullptr;
+static bool g_pdh_gpu_mem_available = false;
 
 // Grow-capable buffer for \GPU Engine wildcard formatted counter values
 static PDH_FMT_COUNTERVALUE_ITEM_W *g_pdh_items = nullptr;
@@ -232,7 +259,13 @@ static void release_pdh()
 		g_pdh_query = nullptr;
 	}
 	g_pdh_cpu_power_counter = nullptr;
+	g_pdh_cpu_temp_counter = nullptr;
 	g_pdh_gpu_counter = nullptr;
+	g_pdh_gpu_mem_counter = nullptr;
+	g_pdh_cpu_power_available = false;
+	g_pdh_cpu_temp_available = false;
+	g_pdh_gpu_available = false;
+	g_pdh_gpu_mem_available = false;
 	if (g_pdh_items != nullptr)
 	{
 		HeapFree(GetProcessHeap(), 0, g_pdh_items);
@@ -253,14 +286,28 @@ static void load_pdh()
 	g_pdh_cpu_power_available =
 		(PdhAddEnglishCounterW(g_pdh_query, L"\\Processor Information(_Total)\\Package Power", 0, &g_pdh_cpu_power_counter) == ERROR_SUCCESS);
 
+	// CPU temperature. Reports Kelvin (sometimes tenths of Kelvin) depending
+	// on the platform; sample_cpu_temp normalizes it to Celsius.
+	g_pdh_cpu_temp_available =
+		(PdhAddEnglishCounterW(g_pdh_query, L"\\Processor Information(_Total)\\Temperature Data", 0, &g_pdh_cpu_temp_counter) == ERROR_SUCCESS);
+
 	// GPU engine utilization, used as fallback while NVML is not available
 	g_pdh_gpu_available =
 		(PdhAddEnglishCounterW(g_pdh_query, L"\\GPU Engine(*)\\Utilization Percentage", 0, &g_pdh_gpu_counter) == ERROR_SUCCESS);
 
+	// Dedicated GPU adapter memory, used as VRAM fallback while NVML is not
+	// available
+	g_pdh_gpu_mem_available =
+		(PdhAddEnglishCounterW(g_pdh_query, L"\\GPU Adapter Memory(*)\\Dedicated Usage", 0, &g_pdh_gpu_mem_counter) == ERROR_SUCCESS);
+
 	if (g_pdh_cpu_power_available)
 		log_info("Performance HUD: CPU package power counter is available.");
+	if (g_pdh_cpu_temp_available)
+		log_info("Performance HUD: CPU temperature counter is available.");
 	if (g_pdh_gpu_available)
 		log_info("Performance HUD: GPU engine counters are available.");
+	if (g_pdh_gpu_mem_available)
+		log_info("Performance HUD: GPU adapter memory counters are available.");
 }
 
 static bool sample_cpu_power(float *out_watts)
@@ -275,6 +322,76 @@ static bool sample_cpu_power(float *out_watts)
 
 	*out_watts = static_cast<float>(value.doubleValue);
 	return true;
+}
+
+// Normalizes the \Temperature Data counter value to Celsius. Depending on
+// the platform it is reported in Kelvin, tenths of Kelvin, or already in
+// Celsius. Plausible CPU temperatures never overlap between those scales for
+// the processed range, so a simple bucketing heuristic is safe.
+static bool sample_cpu_temp(float *out_celsius)
+{
+	if (!g_pdh_cpu_temp_available)
+		return false;
+
+	PDH_FMT_COUNTERVALUE value;
+	if (PdhGetFormattedCounterValue(g_pdh_cpu_temp_counter, PDH_FMT_DOUBLE, nullptr, &value) != ERROR_SUCCESS ||
+		value.CStatus != PDH_CSTATUS_VALID_DATA)
+		return false;
+
+	double celsius = value.doubleValue;
+	if (celsius >= 2000.0 && celsius < 5000.0)       // tenths of Kelvin
+		celsius = celsius * 0.1 - 273.15;
+	else if (celsius > 200.0 && celsius < 500.0)     // Kelvin
+		celsius -= 273.15;
+	// else: assume already Celsius
+
+	if (celsius < -10.0 || celsius > 120.0)
+		return false;
+
+	*out_celsius = static_cast<float>(celsius);
+	return true;
+}
+
+// Finds the dedicated adapter memory usage of the busiest GPU instance, which
+// is how Task Manager reports "Dedicated GPU memory". Values are in bytes.
+static bool sample_gpu_adapter_memory(uint64_t *out_bytes)
+{
+	if (!g_pdh_gpu_mem_available)
+		return false;
+
+	// First call with a null buffer determines the required buffer size
+	DWORD buffer_size = 0;
+	DWORD item_count = 0;
+	PDH_STATUS status = PdhGetFormattedCounterArrayW(g_pdh_gpu_mem_counter, PDH_FMT_DOUBLE, &buffer_size, &item_count, nullptr);
+	if (status != PDH_MORE_DATA || buffer_size == 0)
+		return false;
+
+	if (buffer_size > g_pdh_items_size)
+	{
+		void *const new_items = HeapReAlloc(GetProcessHeap(), 0, g_pdh_items, buffer_size);
+		if (new_items == nullptr)
+			return false;
+		g_pdh_items = static_cast<PDH_FMT_COUNTERVALUE_ITEM_W *>(new_items);
+		g_pdh_items_size = buffer_size;
+	}
+
+	status = PdhGetFormattedCounterArrayW(g_pdh_gpu_mem_counter, PDH_FMT_DOUBLE, &buffer_size, &item_count, g_pdh_items);
+	if (status != ERROR_SUCCESS)
+		return false;
+
+	double max_bytes = 0.0;
+	bool any_valid = false;
+	for (DWORD i = 0; i < item_count; ++i)
+	{
+		if (g_pdh_items[i].FmtValue.CStatus != PDH_CSTATUS_VALID_DATA)
+			continue;
+		any_valid = true;
+		if (g_pdh_items[i].FmtValue.doubleValue > max_bytes)
+			max_bytes = g_pdh_items[i].FmtValue.doubleValue;
+	}
+
+	*out_bytes = static_cast<uint64_t>(max_bytes);
+	return any_valid;
 }
 
 // Finds the highest summed utilization across GPU engine instances, grouped
@@ -413,11 +530,13 @@ static void update_snapshot()
 
 	// Collect performance counter values once per interval, before reading them
 	const bool use_gpu_fallback = (g_nvml_device_count == 0 && g_pdh_gpu_available);
-	if (g_pdh_cpu_power_available || use_gpu_fallback)
+	const bool use_gpu_memory_fallback = (g_nvml_device_count == 0 && g_pdh_gpu_mem_available);
+	if (g_pdh_cpu_power_available || g_pdh_cpu_temp_available || use_gpu_fallback || use_gpu_memory_fallback)
 		PdhCollectQueryData(g_pdh_query);
 
 	next.cpu_power_valid = sample_cpu_power(&next.cpu_power);
 	next.cpu_power_valid = (next.cpu_power_valid && next.cpu_power >= 0.0f);
+	next.cpu_temp_valid = sample_cpu_temp(&next.cpu_temp);
 
 	if (g_nvml_device_count > 0)
 	{
@@ -474,11 +593,30 @@ static void update_snapshot()
 				gpu.temp = static_cast<int>(temperature);
 				gpu.temp_valid = true;
 			}
+
+			nvml::MemoryInfo mem = { 0, 0, 0 };
+			if (nvml::device_get_mem_info != nullptr &&
+				nvml::device_get_mem_info(device, &mem) == nvml::NVML_SUCCESS && mem.total_kib > 0)
+			{
+				constexpr float kib_to_gib = 1.0f / (1024.0f * 1024.0f);
+				gpu.vram_used_gb = static_cast<float>(mem.used_kib) * kib_to_gib;
+				gpu.vram_total_gb = static_cast<float>(mem.total_kib) * kib_to_gib;
+				gpu.vram_valid = true;
+			}
 		}
 	}
-	else if (use_gpu_fallback)
+	else if (use_gpu_fallback || use_gpu_memory_fallback)
 	{
-		next.gpu_fallback_valid = sample_gpu_engine_utilization(&next.gpu_fallback_usage);
+		if (use_gpu_fallback)
+			next.gpu_fallback_valid = sample_gpu_engine_utilization(&next.gpu_fallback_usage);
+
+		uint64_t vram_bytes = 0;
+		if (use_gpu_memory_fallback && sample_gpu_adapter_memory(&vram_bytes) && vram_bytes > 0)
+		{
+			constexpr float bytes_to_gib = 1.0f / (1024.0f * 1024.0f * 1024.0f);
+			next.gpu_fallback_vram_usage = static_cast<float>(vram_bytes) * bytes_to_gib;
+			next.gpu_fallback_vram_valid = true;
+		}
 	}
 
 	// Publish
@@ -520,6 +658,94 @@ static void start_sampler_thread()
 	}
 }
 
+// --------------------------------------------------------------- frame times
+
+// Rolling history of the most recent frame durations. Sizes determine the
+// denominator of the 0.1% low statistic; 8192 frames equals ~136 seconds of
+// history at 60 FPS.
+static constexpr uint32_t kFrameHistory = 8192;
+
+struct FrameRing
+{
+	SRWLOCK lock = SRWLOCK_INIT;
+	uint32_t head = 0;              // total number of frames written
+	float ms[kFrameHistory] = { 0.0f };
+};
+static FrameRing g_frames;
+
+struct FpsStats
+{
+	bool  valid;
+	float fps;                      // average FPS across the history window
+	float low1;                     // 1% low FPS
+	float low01;                    // 0.1% low FPS
+};
+static FpsStats g_fps_stats = {};
+static SRWLOCK g_fps_stats_lock = SRWLOCK_INIT;
+static ULARGE_INTEGER g_last_stats_tick = {};
+static float g_frames_copy[kFrameHistory];
+
+// Average duration of the slowest frames in a sorted (ascending) frame time
+// buffer.
+static double slowest_average_ms(const float *sorted_ms, uint32_t count, uint32_t slowest)
+{
+	double sum = 0.0;
+	for (uint32_t i = count - slowest; i < count; ++i)
+		sum += sorted_ms[i];
+	return sum / static_cast<double>(slowest);
+}
+
+static void record_frame_time(float frame_ms)
+{
+	AcquireSRWLockExclusive(&g_frames.lock);
+	g_frames.ms[g_frames.head % kFrameHistory] = frame_ms;
+	++g_frames.head;
+	ReleaseSRWLockExclusive(&g_frames.lock);
+}
+
+// Recomputes FPS and percent-low statistics from the frame history, at most
+// twice per second.
+static void update_fps_stats()
+{
+	const ULONGLONG now = GetTickCount64();
+	if (g_last_stats_tick.QuadPart != 0 && now - g_last_stats_tick.QuadPart < 500)
+		return;
+	g_last_stats_tick.QuadPart = now;
+
+	uint32_t count = 0;
+	{
+		AcquireSRWLockShared(&g_frames.lock);
+		const uint32_t head = g_frames.head;
+		const uint32_t begin = (head > kFrameHistory) ? (head - kFrameHistory) : 0;
+		for (uint32_t i = begin; i < head; ++i)
+			g_frames_copy[count++] = g_frames.ms[i % kFrameHistory];
+		ReleaseSRWLockShared(&g_frames.lock);
+	}
+
+	FpsStats stats = {};
+	stats.valid = (count >= 32); // not enough history yet to be meaningful
+	if (stats.valid)
+	{
+		double time_sum_ms = 0.0;
+		for (uint32_t i = 0; i < count; ++i)
+			time_sum_ms += g_frames_copy[i];
+		stats.fps = static_cast<float>(1000.0 * count / time_sum_ms);
+
+		// Percent lows: 1% / 0.1% low FPS is the frame rate equivalent of the
+		// average of the slowest 1% / 0.1% of frames in the history window.
+		std::sort(g_frames_copy, g_frames_copy + count);
+
+		const uint32_t count_1 = count / 100 > 0 ? count / 100 : 1;
+		const uint32_t count_01 = count / 1000 > 0 ? count / 1000 : 1;
+		stats.low1 = static_cast<float>(1000.0 / slowest_average_ms(g_frames_copy, count, count_1));
+		stats.low01 = static_cast<float>(1000.0 / slowest_average_ms(g_frames_copy, count, count_01));
+	}
+
+	AcquireSRWLockExclusive(&g_fps_stats_lock);
+	g_fps_stats = stats;
+	ReleaseSRWLockExclusive(&g_fps_stats_lock);
+}
+
 // --------------------------------------------------------------- OSD
 
 static const ImVec4 color_for_percent(float percent)
@@ -531,30 +757,97 @@ static const ImVec4 color_for_percent(float percent)
 	return ImVec4(0.63f, 0.93f, 0.65f, 1.0f);
 }
 
-static void format_line(char *buffer, size_t size, const char *label, float usage, float watts, bool with_power, int temp, bool with_temp)
+static const ImVec4 base_color()
+{
+	return ImVec4(g_hud_color[0], g_hud_color[1], g_hud_color[2], g_hud_color[3]);
+}
+
+static const ImVec4 line_color(float percent)
+{
+	return g_use_threshold_colors ? color_for_percent(percent) : base_color();
+}
+
+static void format_vram_text(char *buffer, size_t size, const GpuSample &gpu)
+{
+	if (gpu.vram_total_gb < 0.05f)
+	{
+		buffer[0] = '\0';
+		return;
+	}
+	snprintf(buffer, size, "VRAM %.1f/%.1fG", gpu.vram_used_gb, gpu.vram_total_gb);
+}
+
+static void format_line(char *buffer, size_t size, const char *label, float usage, float watts, bool with_power, int temp, bool with_temp, const char *vram_text)
 {
 	int offset = snprintf(buffer, size, "%s %5.1f%%", label, usage);
 	if (offset < 0 || static_cast<size_t>(offset) >= size)
 		return;
+	size_t remaining = size - static_cast<size_t>(offset);
+	if (remaining < 2)
+		return;
 	if (with_power)
 	{
-		const int written = snprintf(buffer + offset, size - offset, "  %4.0f W", watts);
-		if (written < 0 || static_cast<size_t>(written) >= size - offset)
+		const int written = snprintf(buffer + offset, remaining, "  %4.0f W", watts);
+		if (written < 0)
+			return;
+		if (static_cast<size_t>(written) >= remaining)
 			return;
 		offset += written;
+		remaining -= static_cast<size_t>(written);
 	}
 	if (with_temp)
-		snprintf(buffer + offset, size - offset, "  %3d C", temp);
+	{
+		const int written = snprintf(buffer + offset, remaining, "  %3d C", temp);
+		if (written < 0)
+			return;
+		if (static_cast<size_t>(written) >= remaining)
+			return;
+		offset += written;
+		remaining -= static_cast<size_t>(written);
+	}
+	if (vram_text != nullptr && vram_text[0] != '\0')
+		snprintf(buffer + offset, remaining, "  %s", vram_text);
+}
+
+static void draw_fps_lines(reshade::api::effect_runtime *)
+{
+	if (!g_show_fps)
+		return;
+
+	update_fps_stats();
+
+	AcquireSRWLockShared(&g_fps_stats_lock);
+	const FpsStats stats = g_fps_stats;
+	ReleaseSRWLockShared(&g_fps_stats_lock);
+
+	if (!stats.valid)
+		return;
+
+	ImGui::TextColored(base_color(), "FPS %6.1f", stats.fps);
+	ImGui::TextColored(base_color(), "1%% Low %6.1f   0.1%% Low %6.1f", stats.low1, stats.low01);
 }
 
 static void draw_osd(reshade::api::effect_runtime *)
 {
-	if (!g_show_cpu_usage && !g_show_gpu_usage)
+	if (!g_show_cpu_usage && !g_show_gpu_usage && !g_show_fps)
 		return;
+
+	// Scales the OSD text. PushFont(nullptr, FontSizeBase * scale) is the
+	// Dear ImGui 1.92 replacement for the legacy ImGui::SetWindowFontScale.
+	ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * g_hud_scale);
+
+	if (!g_show_cpu_usage && !g_show_gpu_usage)
+	{
+		draw_fps_lines(nullptr);
+		ImGui::PopFont();
+		return;
+	}
 
 	AcquireSRWLockShared(&g_snapshot_lock);
 	StatsSnapshot snapshot = g_snapshot;
 	ReleaseSRWLockShared(&g_snapshot_lock);
+
+	draw_fps_lines(nullptr);
 
 	char text[128];
 
@@ -564,8 +857,9 @@ static void draw_osd(reshade::api::effect_runtime *)
 		{
 			format_line(text, sizeof(text), "CPU", snapshot.cpu_usage,
 				snapshot.cpu_power, g_show_power && snapshot.cpu_power_valid,
-				0, false);
-			ImGui::TextColored(color_for_percent(snapshot.cpu_usage), "%s", text);
+				static_cast<int>(snapshot.cpu_temp + 0.5f),
+				g_show_cpu_temp && snapshot.cpu_temp_valid, nullptr);
+			ImGui::TextColored(line_color(snapshot.cpu_usage), "%s", text);
 		}
 		else
 		{
@@ -574,7 +868,10 @@ static void draw_osd(reshade::api::effect_runtime *)
 	}
 
 	if (!g_show_gpu_usage)
+	{
+		ImGui::PopFont();
 		return;
+	}
 
 	if (snapshot.has_nvidia)
 	{
@@ -590,21 +887,43 @@ static void draw_osd(reshade::api::effect_runtime *)
 			else
 				snprintf(label, sizeof(label), "GPU");
 
+			char vram_text[24];
+			if (g_show_vram && gpu.vram_valid)
+				format_vram_text(vram_text, sizeof(vram_text), gpu);
+			else
+				vram_text[0] = '\0';
+
 			format_line(text, sizeof(text), label, gpu.usage,
 				gpu.power, g_show_power && gpu.power_valid,
-				gpu.temp, g_show_temp && gpu.temp_valid);
-			ImGui::TextColored(color_for_percent(gpu.usage), "%s", text);
+				gpu.temp, g_show_temp && gpu.temp_valid, vram_text);
+			ImGui::TextColored(line_color(gpu.usage), "%s", text);
 		}
 	}
-	else if (snapshot.gpu_fallback_valid)
+	else if (snapshot.gpu_fallback_valid || snapshot.gpu_fallback_vram_valid)
 	{
-		format_line(text, sizeof(text), "GPU", snapshot.gpu_fallback_usage, 0.0f, false, 0, false);
-		ImGui::TextColored(color_for_percent(snapshot.gpu_fallback_usage), "%s", text);
+		if (snapshot.gpu_fallback_valid)
+		{
+			format_line(text, sizeof(text), "GPU", snapshot.gpu_fallback_usage, 0.0f, false, 0, false, nullptr);
+			ImGui::TextColored(line_color(snapshot.gpu_fallback_usage), "%s", text);
+		}
+		else
+		{
+			ImGui::TextDisabled("GPU ...");
+		}
+
+		if (g_show_vram && snapshot.gpu_fallback_vram_valid)
+		{
+			char vram_text[40];
+			snprintf(vram_text, sizeof(vram_text), "VRAM %.1fG", snapshot.gpu_fallback_vram_usage);
+			ImGui::TextColored(base_color(), "%s", vram_text);
+		}
 	}
 	else
 	{
 		ImGui::TextDisabled("GPU ...");
 	}
+
+	ImGui::PopFont();
 }
 
 // --------------------------------------------------------------- settings
@@ -615,17 +934,49 @@ static void save_config(reshade::api::effect_runtime *runtime)
 {
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCPU", g_show_cpu_usage);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowGPU", g_show_gpu_usage);
-	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowTemp", g_show_temp);
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCPUTemp", g_show_cpu_temp);
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowGPUTemp", g_show_temp);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowPower", g_show_power);
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowVram", g_show_vram);
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowFps", g_show_fps);
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudScale", g_hud_scale);
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "RefreshIntervalMs", static_cast<int>(g_interval_ms.load()));
+
+	char color_string[64];
+	snprintf(color_string, sizeof(color_string), "%.3f,%.3f,%.3f,%.3f",
+		g_hud_color[0], g_hud_color[1], g_hud_color[2], g_hud_color[3]);
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudColor", static_cast<const char *>(color_string));
 }
 
 static void load_config()
 {
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowCPU", g_show_cpu_usage);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowGPU", g_show_gpu_usage);
-	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowTemp", g_show_temp);
+	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowCPUTemp", g_show_cpu_temp);
+	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowGPUTemp", g_show_temp);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowPower", g_show_power);
+	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowVram", g_show_vram);
+	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowFps", g_show_fps);
+	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
+
+	if (reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "HudScale", g_hud_scale) &&
+		(g_hud_scale < 0.25f || g_hud_scale > 4.0f))
+		g_hud_scale = 1.0f;
+
+	char color_string[64];
+	size_t color_length = sizeof(color_string) - 1;
+	if (reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "HudColor", color_string, &color_length))
+	{
+		float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f;
+		if (sscanf(color_string, "%f,%f,%f,%f", &r, &g, &b, &a) == 4)
+		{
+			g_hud_color[0] = (r < 0.0f ? 0.0f : r > 1.0f ? 1.0f : r);
+			g_hud_color[1] = (g < 0.0f ? 0.0f : g > 1.0f ? 1.0f : g);
+			g_hud_color[2] = (b < 0.0f ? 0.0f : b > 1.0f ? 1.0f : b);
+			g_hud_color[3] = (a < 0.0f ? 0.0f : a > 1.0f ? 1.0f : a);
+		}
+	}
 
 	if (reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "RefreshIntervalMs", g_interval_config) &&
 		g_interval_config >= 100 && g_interval_config <= 10000)
@@ -640,14 +991,34 @@ static void load_config()
 
 static void draw_settings(reshade::api::effect_runtime *runtime)
 {
+	ImGui::SeparatorText("Metrics");
 	if (ImGui::Checkbox("Show CPU usage", &g_show_cpu_usage))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCPU", g_show_cpu_usage);
 	if (ImGui::Checkbox("Show GPU usage", &g_show_gpu_usage))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowGPU", g_show_gpu_usage);
+	if (ImGui::Checkbox("Show CPU temperature", &g_show_cpu_temp))
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCPUTemp", g_show_cpu_temp);
 	if (ImGui::Checkbox("Show GPU temperature", &g_show_temp))
-		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowTemp", g_show_temp);
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowGPUTemp", g_show_temp);
 	if (ImGui::Checkbox("Show power draw", &g_show_power))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowPower", g_show_power);
+	if (ImGui::Checkbox("Show VRAM usage", &g_show_vram))
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowVram", g_show_vram);
+	if (ImGui::Checkbox("Show FPS and 1%%/0.1%% low", &g_show_fps))
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowFps", g_show_fps);
+
+	ImGui::SeparatorText("Appearance");
+	if (ImGui::SliderFloat("HUD scale##perfhud", &g_hud_scale, 0.5f, 3.0f, "%.2fx"))
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudScale", g_hud_scale);
+	if (ImGui::Checkbox("Color lines by load", &g_use_threshold_colors))
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
+	if (ImGui::ColorEdit4("Base text color", g_hud_color))
+	{
+		char color_string[64];
+		snprintf(color_string, sizeof(color_string), "%.3f,%.3f,%.3f,%.3f",
+			g_hud_color[0], g_hud_color[1], g_hud_color[2], g_hud_color[3]);
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudColor", static_cast<const char *>(color_string));
+	}
 
 	if (ImGui::SliderInt("Refresh interval (ms)", &g_interval_config, 100, 10000))
 	{
@@ -667,6 +1038,11 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 	else
 		ImGui::TextDisabled("CPU package power counter is unavailable on this system.");
 
+	if (g_pdh_cpu_temp_available)
+		ImGui::TextDisabled("CPU temperature counter is available.");
+	else
+		ImGui::TextDisabled("CPU temperature counter is unavailable on this system.");
+
 	ImGui::TextDisabled("GPU power and temperature require NVIDIA NVML (other GPUs report usage only).");
 }
 
@@ -674,6 +1050,26 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 
 static void on_present(reshade::api::effect_runtime *)
 {
+	// Record frame durations from swapchain present cycles, for FPS and
+	// percent-low statistics. Deltas above one second are discarded (device
+	// recreate, process suspension, etc.).
+	LARGE_INTEGER now, freq;
+	if (QueryPerformanceCounter(&now) && QueryPerformanceFrequency(&freq))
+	{
+		static LARGE_INTEGER prev = {};
+		static bool prev_valid = false;
+
+		if (prev_valid)
+		{
+			const float frame_ms = static_cast<float>(
+				static_cast<double>(now.QuadPart - prev.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart));
+			if (frame_ms > 0.0f && frame_ms < 1000.0f)
+				record_frame_time(frame_ms);
+		}
+		prev = now;
+		prev_valid = true;
+	}
+
 	start_sampler_thread();
 }
 
@@ -681,7 +1077,7 @@ static void on_present(reshade::api::effect_runtime *)
 
 extern "C" __declspec(dllexport) const char *NAME = "Performance HUD";
 extern "C" __declspec(dllexport) const char *AUTHOR = "reshade-better-color-and-texture";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Shows CPU and GPU usage plus power draw on the always-visible ReShade on-screen display.";
+extern "C" __declspec(dllexport) const char *DESCRIPTION = "Shows CPU/GPU usage, power draw, temperatures, VRAM usage and FPS with 1%/0.1% low stats on the always-visible ReShade on-screen display.";
 extern "C" __declspec(dllexport) const char *WEBSITE = "https://github.com/kless/reshade-better-color-and-texture";
 
 static void init()
