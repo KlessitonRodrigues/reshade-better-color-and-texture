@@ -69,7 +69,7 @@ reshade-better-color-and-texture/
 ## Build / Test / Release
 
 - The HLSL preset has **no build system or test suite**: validation is manual (load the preset in ReShade and verify effects render without compile errors).
-- The Performance HUD add-on (`addons/performance-hud/`) builds via `build.sh` (llvm-mingw cross-build, also works on Linux) or `CMakeLists.txt` (MSVC on Windows). A prebuilt `PerformanceHUD.addon64` is committed and loaded via `[ADDON] AddonPath` in `ReShade.ini`; rebuild it after editing `src/performance_hud.cpp` and make sure the vendored headers in `include/` (reshade + imgui 1.92.5) stay in sync with the installed ReShade version.
+- The Performance HUD add-on (`addons/performance-hud/`) builds via `build.sh` (llvm-mingw cross-build, also works on Linux; if no llvm-mingw is installed it auto-downloads a pinned toolchain to `~/.cache` on first run) or `CMakeLists.txt` (MSVC on Windows). A prebuilt `PerformanceHUD.addon64` is committed and loaded via `[ADDON] AddonPath` in `ReShade.ini`; rebuild it after editing `src/performance_hud.cpp` and make sure the vendored headers in `include/` (reshade + imgui 1.92.5) stay in sync with the installed ReShade version.
 - Release: pushing to `main` triggers `.github/workflows/release.yml`, which tags `v${GITHUB_RUN_NUMBER}`, zips the repo (excluding `.git/*` and `.github/*`), and publishes a GitHub Release.
 
 ## Notes for Agents
