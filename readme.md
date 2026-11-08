@@ -24,6 +24,22 @@ This preset improves color, shadows, texture detail, and sharpness in supported 
 2. Copy the preset files (such as `ReShadePreset.ini` and related files/folders) to the same folder as the game executable.
 3. Launch the game and open the ReShade menu (default key is usually `Home`) to load the preset.
 
+## Performance HUD
+
+The preset includes a ReShade add-on (`addons/performance-hud/PerformanceHUD.addon64`) that displays an always-visible on-screen HUD with:
+
+- CPU usage (and CPU package power in watts when the system provides it)
+- GPU usage per adapter, with power draw and temperature on NVIDIA GPUs (via NVML)
+- On non-NVIDIA GPUs, usage is shown using Windows GPU engine counters (what Task Manager uses)
+
+Configure it under **Add-ons > Performance HUD** in the ReShade overlay (toggle lines, refresh interval). Usage turns amber above 60% and red above 90%.
+
+Notes:
+
+- Requires a full ReShade installation (with add-on support) that includes the `AddonPath` handling; `ReShade.ini` in this repository already sets `[ADDON] AddonPath=.\addons\performance-hud`.
+- Copy `addons/performance-hud/PerformanceHUD.addon64` together with the other preset files next to the game executable for the HUD to load.
+
+
 ## Videos
 
 - [Watch Dogs video](https://youtu.be/9CZt-tkJ0gY)

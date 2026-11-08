@@ -1,0 +1,728 @@
+/*
+ * Performance HUD - ReShade add-on
+ *
+ * Shows CPU and GPU usage plus power draw on ReShade's always-visible
+ * on-screen display (OSD).
+ *
+ * Data sources:
+ *  - CPU usage:      GetSystemTimes (kernel/user time deltas)
+ *  - CPU power:      PDH counter \Processor Information(_Total)\Package Power
+ *                    (only shown when the system provides the counter)
+ *  - GPU usage:      NVML (NVIDIA) with PDH \GPU Engine(*)\Utilization
+ *                    Percentage fallback (what Task Manager uses, Windows 10+)
+ *  - GPU power/temp: NVML only (vendor SDK access is required for AMD/Intel)
+ *
+ * Copyright (C) 2026 reshade-better-color-and-texture contributors
+ * SPDX-License-Identifier: BSD-3-Clause OR MIT
+ */
+
+#define ImTextureID ImU64
+#include <imgui.h>
+#include <reshade.hpp>
+
+#include <pdh.h>
+#include <pdhmsg.h>
+
+#include <atomic>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+
+static constexpr int kMaxGpus = 16;
+
+static void log_info(const char *fmt, ...)
+{
+	char message[256];
+	va_list args;
+	va_start(args, fmt);
+	vsnprintf(message, sizeof(message), fmt, args);
+	va_end(args);
+	reshade::log::message(reshade::log::level::info, message);
+}
+
+static void log_warning(const char *fmt, ...)
+{
+	char message[256];
+	va_list args;
+	va_start(args, fmt);
+	vsnprintf(message, sizeof(message), fmt, args);
+	va_end(args);
+	reshade::log::message(reshade::log::level::warning, message);
+}
+
+// --------------------------------------------------------------- statistics
+
+struct GpuSample
+{
+	char name[96];
+	float usage;
+	float power;
+	int   temp;
+	bool  usage_valid;
+	bool  power_valid;
+	bool  temp_valid;
+};
+
+struct StatsSnapshot
+{
+	bool  cpu_usage_valid;
+	float cpu_usage;          // percent 0-100
+	bool  cpu_power_valid;
+	float cpu_power;          // watts
+	bool  gpu_fallback_valid; // PDH GPU Engine counters are in use
+	float gpu_fallback_usage; // percent 0-100
+	bool  has_nvidia;
+	int   gpu_count;
+	GpuSample gpus[kMaxGpus];
+};
+
+static StatsSnapshot g_snapshot = {};
+static SRWLOCK g_snapshot_lock = SRWLOCK_INIT;
+
+// --------------------------------------------------------------- settings
+
+static bool g_show_cpu_usage = true;
+static bool g_show_gpu_usage = true;
+static bool g_show_temp = true;
+static bool g_show_power = true;
+static std::atomic<uint32_t> g_interval_ms { 1000 };
+
+// --------------------------------------------------------------- NVML
+
+namespace nvml
+{
+	constexpr int NVML_SUCCESS = 0;
+	constexpr int NVML_TEMPERATURE_GPU = 0;
+
+	struct Utilization { uint32_t gpu; uint32_t memory; };
+
+	using Init_t =            int (*)();
+	using Shutdown_t =        int (*)();
+	using DeviceGetCount_t =  int (*)(uint32_t *);
+	using DeviceGetHandle_t = int (*)(uint32_t, void **);
+	using DeviceGetName_t =   int (*)(void *, char *, uint32_t);
+	using DeviceGetUtil_t =   int (*)(void *, Utilization *);
+	using DeviceGetPower_t =  int (*)(void *, uint32_t *);
+	using DeviceGetTemp_t =   int (*)(void *, int, uint32_t *);
+	using DeviceGetEnergy_t = int (*)(void *, uint64_t *);
+
+	static HMODULE module = nullptr;
+	static Init_t init = nullptr;
+	static Shutdown_t shutdown = nullptr;
+	static DeviceGetCount_t device_get_count = nullptr;
+	static DeviceGetHandle_t device_get_handle = nullptr;
+	static DeviceGetName_t device_get_name = nullptr;
+	static DeviceGetUtil_t device_get_util = nullptr;
+	static DeviceGetPower_t device_get_power = nullptr;
+	static DeviceGetTemp_t device_get_temp = nullptr;
+	static DeviceGetEnergy_t device_get_energy = nullptr;
+}
+
+static void *g_nvml_devices[kMaxGpus] = { nullptr };
+static int g_nvml_device_count = 0;
+
+// Previous energy counters, used to derive power from an energy delta on GPUs
+// that do not report instantaneous power.
+static ULARGE_INTEGER g_prev_energy_tick[kMaxGpus];
+static uint64_t g_prev_energy[kMaxGpus] = { 0 };
+static bool g_prev_energy_valid[kMaxGpus] = { false };
+
+static void release_nvml()
+{
+	if (nvml::module != nullptr && nvml::shutdown != nullptr)
+	{
+		// The library itself stays loaded for the remainder of the process
+		// lifetime; release_nvml is only ever called during teardown.
+		nvml::shutdown();
+	}
+	g_nvml_device_count = 0;
+}
+
+static void load_nvml()
+{
+	HMODULE module = LoadLibraryW(L"nvml.dll");
+	if (module == nullptr)
+	{
+		// nvml.dll ships with the NVIDIA display driver, but is not always on
+		// the DLL search path. Probe the driver store as a fallback.
+		WIN32_FIND_DATAW find_data;
+		HANDLE find_handle = FindFirstFileW(L"C:\\Windows\\System32\\DriverStore\\FileRepository\\nv*.inf_amd64_*\\nvml.dll", &find_data);
+		if (find_handle != INVALID_HANDLE_VALUE)
+		{
+			do
+			{
+				wchar_t path[MAX_PATH];
+				swprintf_s(path, L"C:\\Windows\\System32\\DriverStore\\FileRepository\\%ls\\nvml.dll", find_data.cFileName);
+				module = LoadLibraryW(path);
+			} while (module == nullptr && FindNextFileW(find_handle, &find_data));
+			FindClose(find_handle);
+		}
+	}
+	if (module == nullptr)
+	{
+		log_info("Performance HUD: no NVML library found.");
+		return;
+	}
+
+#define NVML_PROC(name, variable, signature) \
+	variable = reinterpret_cast<signature>(reinterpret_cast<void *>(GetProcAddress(module, name)))
+	NVML_PROC("nvmlInit_v1", nvml::init, nvml::Init_t);
+	if (nvml::init == nullptr)
+		NVML_PROC("nvmlInit", nvml::init, nvml::Init_t);
+	NVML_PROC("nvmlShutdown", nvml::shutdown, nvml::Shutdown_t);
+	NVML_PROC("nvmlDeviceGetCount_v2", nvml::device_get_count, nvml::DeviceGetCount_t);
+	NVML_PROC("nvmlDeviceGetHandleByIndex_v2", nvml::device_get_handle, nvml::DeviceGetHandle_t);
+	NVML_PROC("nvmlDeviceGetName", nvml::device_get_name, nvml::DeviceGetName_t);
+	NVML_PROC("nvmlDeviceGetUtilizationRates", nvml::device_get_util, nvml::DeviceGetUtil_t);
+	NVML_PROC("nvmlDeviceGetPowerUsage", nvml::device_get_power, nvml::DeviceGetPower_t);
+	NVML_PROC("nvmlDeviceGetTemperature", nvml::device_get_temp, nvml::DeviceGetTemp_t);
+	NVML_PROC("nvmlDeviceGetTotalEnergyConsumption", nvml::device_get_energy, nvml::DeviceGetEnergy_t);
+#undef NVML_PROC
+
+	if (nvml::init == nullptr || nvml::device_get_count == nullptr || nvml::device_get_handle == nullptr ||
+		nvml::device_get_util == nullptr)
+	{
+		FreeLibrary(module);
+		return;
+	}
+	if (nvml::init() != nvml::NVML_SUCCESS)
+	{
+		FreeLibrary(module);
+		return;
+	}
+
+	nvml::module = module;
+
+	uint32_t count = 0;
+	if (nvml::device_get_count(&count) != nvml::NVML_SUCCESS)
+	{
+		release_nvml();
+		return;
+	}
+	if (count > kMaxGpus)
+		count = kMaxGpus;
+
+	for (uint32_t i = 0; i < count && g_nvml_device_count < kMaxGpus; ++i)
+	{
+		void *device = nullptr;
+		if (nvml::device_get_handle(i, &device) == nvml::NVML_SUCCESS && device != nullptr)
+			g_nvml_devices[g_nvml_device_count++] = device;
+	}
+
+	log_info("Performance HUD: initialized NVML with %d GPU(s).", g_nvml_device_count);
+}
+
+// --------------------------------------------------------------- PDH
+
+static PDH_HQUERY g_pdh_query = nullptr;
+static PDH_HCOUNTER g_pdh_cpu_power_counter = nullptr;
+static bool g_pdh_cpu_power_available = false;
+static PDH_HCOUNTER g_pdh_gpu_counter = nullptr;
+static bool g_pdh_gpu_available = false;
+
+// Grow-capable buffer for \GPU Engine wildcard formatted counter values
+static PDH_FMT_COUNTERVALUE_ITEM_W *g_pdh_items = nullptr;
+static DWORD g_pdh_items_size = 0;
+
+static void release_pdh()
+{
+	if (g_pdh_query != nullptr)
+	{
+		PdhCloseQuery(g_pdh_query);
+		g_pdh_query = nullptr;
+	}
+	g_pdh_cpu_power_counter = nullptr;
+	g_pdh_gpu_counter = nullptr;
+	if (g_pdh_items != nullptr)
+	{
+		HeapFree(GetProcessHeap(), 0, g_pdh_items);
+		g_pdh_items = nullptr;
+		g_pdh_items_size = 0;
+	}
+}
+
+static void load_pdh()
+{
+	if (PdhOpenQueryW(nullptr, 0, &g_pdh_query) != ERROR_SUCCESS)
+	{
+		g_pdh_query = nullptr;
+		return;
+	}
+
+	// CPU package power in watts, if the system provides this counter
+	g_pdh_cpu_power_available =
+		(PdhAddEnglishCounterW(g_pdh_query, L"\\Processor Information(_Total)\\Package Power", 0, &g_pdh_cpu_power_counter) == ERROR_SUCCESS);
+
+	// GPU engine utilization, used as fallback while NVML is not available
+	g_pdh_gpu_available =
+		(PdhAddEnglishCounterW(g_pdh_query, L"\\GPU Engine(*)\\Utilization Percentage", 0, &g_pdh_gpu_counter) == ERROR_SUCCESS);
+
+	if (g_pdh_cpu_power_available)
+		log_info("Performance HUD: CPU package power counter is available.");
+	if (g_pdh_gpu_available)
+		log_info("Performance HUD: GPU engine counters are available.");
+}
+
+static bool sample_cpu_power(float *out_watts)
+{
+	if (!g_pdh_cpu_power_available)
+		return false;
+
+	PDH_FMT_COUNTERVALUE value;
+	if (PdhGetFormattedCounterValue(g_pdh_cpu_power_counter, PDH_FMT_DOUBLE, nullptr, &value) != ERROR_SUCCESS ||
+		value.CStatus != PDH_CSTATUS_VALID_DATA)
+		return false;
+
+	*out_watts = static_cast<float>(value.doubleValue);
+	return true;
+}
+
+// Finds the highest summed utilization across GPU engine instances, grouped
+// per physical adapter, which is also how Task Manager reports "GPU" load.
+static bool sample_gpu_engine_utilization(float *out_utilization)
+{
+	*out_utilization = 0.0f;
+
+	// First call with a null buffer determines the required buffer size
+	DWORD buffer_size = 0;
+	DWORD item_count = 0;
+	PDH_STATUS status = PdhGetFormattedCounterArrayW(g_pdh_gpu_counter, PDH_FMT_DOUBLE, &buffer_size, &item_count, nullptr);
+	if (status != PDH_MORE_DATA || buffer_size == 0)
+		return false;
+
+	if (buffer_size > g_pdh_items_size)
+	{
+		void *const new_items = HeapReAlloc(GetProcessHeap(), 0, g_pdh_items, buffer_size);
+		if (new_items == nullptr)
+			return false;
+		g_pdh_items = static_cast<PDH_FMT_COUNTERVALUE_ITEM_W *>(new_items);
+		g_pdh_items_size = buffer_size;
+	}
+
+	status = PdhGetFormattedCounterArrayW(g_pdh_gpu_counter, PDH_FMT_DOUBLE, &buffer_size, &item_count, g_pdh_items);
+	if (status != ERROR_SUCCESS)
+		return false;
+
+	// Instances look like 'pid_1234_luid_0x00000000_0x0000E381_phys_0_eng_10_engtype_Compute_1'.
+	// Group by everything up to the first '_eng_', i.e. per LUID/physical adapter.
+	struct Group { wchar_t key[96]; float utilization; };
+	Group groups[32];
+	int group_count = 0;
+
+	float max_utilization = 0.0f;
+	for (DWORD i = 0; i < item_count; ++i)
+	{
+		const wchar_t *const instance = g_pdh_items[i].szName;
+		if (instance == nullptr || g_pdh_items[i].FmtValue.CStatus != PDH_CSTATUS_VALID_DATA)
+			continue;
+
+		const wchar_t *const luid = wcsstr(instance, L"luid_");
+		if (luid == nullptr)
+			continue;
+		const wchar_t *const eng = wcsstr(luid, L"_eng_");
+		if (eng == nullptr)
+			continue;
+
+		const size_t key_length = static_cast<size_t>(eng - luid);
+		if (key_length == 0 || key_length >= 96)
+			continue;
+
+		int group_index = -1;
+		for (int j = 0; j < group_count; ++j)
+		{
+			if (wcsncmp(groups[j].key, luid, key_length) == 0 && groups[j].key[key_length] == L'\0')
+			{
+				group_index = j;
+				break;
+			}
+		}
+		if (group_index < 0)
+		{
+			if (group_count >= 32)
+				continue;
+			group_index = group_count++;
+			wcsncpy_s(groups[group_index].key, luid, key_length);
+			groups[group_index].utilization = 0.0f;
+		}
+
+		groups[group_index].utilization += static_cast<float>(g_pdh_items[i].FmtValue.doubleValue);
+		if (groups[group_index].utilization > max_utilization)
+			max_utilization = groups[group_index].utilization;
+	}
+
+	*out_utilization = (max_utilization > 100.0f ? 100.0f : max_utilization);
+	return (group_count > 0);
+}
+
+// --------------------------------------------------------------- CPU usage
+
+static ULARGE_INTEGER g_prev_idle_time = {};
+static ULARGE_INTEGER g_prev_time_value = {};
+static bool g_prev_time_valid = false;
+
+static bool sample_cpu_usage(float *out_usage)
+{
+	FILETIME idle_time, kernel_time, user_time;
+	if (!GetSystemTimes(&idle_time, &kernel_time, &user_time))
+	{
+		g_prev_time_valid = false;
+		return false;
+	}
+
+	ULARGE_INTEGER idle, kernel, user;
+	idle.LowPart = idle_time.dwLowDateTime;
+	idle.HighPart = idle_time.dwHighDateTime;
+	kernel.LowPart = kernel_time.dwLowDateTime;
+	kernel.HighPart = kernel_time.dwHighDateTime;
+	user.LowPart = user_time.dwLowDateTime;
+	user.HighPart = user_time.dwHighDateTime;
+
+	// Kernel time already includes idle time, so busy time = (kernel + user) - idle
+	const uint64_t idle_now = idle.QuadPart;
+	const uint64_t time_now = kernel.QuadPart + user.QuadPart;
+
+	float usage = 0.0f;
+	bool valid = g_prev_time_valid;
+	if (valid)
+	{
+		const double idle_delta = static_cast<double>(idle_now) - static_cast<double>(g_prev_idle_time.QuadPart);
+		const double time_delta = static_cast<double>(time_now) - static_cast<double>(g_prev_time_value.QuadPart);
+		if (time_delta > 0.0)
+			usage = static_cast<float>(100.0 - 100.0 * idle_delta / time_delta);
+		else
+			valid = false;
+	}
+
+	g_prev_idle_time.QuadPart = idle_now;
+	g_prev_time_value.QuadPart = time_now;
+	g_prev_time_valid = true;
+
+	*out_usage = usage;
+	return valid;
+}
+
+// --------------------------------------------------------------- sampling
+
+static void update_snapshot()
+{
+	StatsSnapshot next;
+	memset(&next, 0, sizeof(next));
+
+	// CPU usage via time deltas
+	next.cpu_usage_valid = sample_cpu_usage(&next.cpu_usage);
+
+	// Collect performance counter values once per interval, before reading them
+	const bool use_gpu_fallback = (g_nvml_device_count == 0 && g_pdh_gpu_available);
+	if (g_pdh_cpu_power_available || use_gpu_fallback)
+		PdhCollectQueryData(g_pdh_query);
+
+	next.cpu_power_valid = sample_cpu_power(&next.cpu_power);
+	next.cpu_power_valid = (next.cpu_power_valid && next.cpu_power >= 0.0f);
+
+	if (g_nvml_device_count > 0)
+	{
+		next.has_nvidia = true;
+		next.gpu_count = g_nvml_device_count;
+
+		const ULONGLONG now = GetTickCount64();
+		for (int i = 0; i < g_nvml_device_count; ++i)
+		{
+			void *device = g_nvml_devices[i];
+			GpuSample &gpu = next.gpus[i];
+
+			if (nvml::device_get_name != nullptr)
+				nvml::device_get_name(device, gpu.name, sizeof(gpu.name));
+
+			nvml::Utilization utilization = { 0, 0 };
+			if (nvml::device_get_util(device, &utilization) == nvml::NVML_SUCCESS)
+			{
+				gpu.usage = static_cast<float>(utilization.gpu);
+				gpu.usage_valid = true;
+			}
+
+			uint32_t power_milliwatt = 0;
+			if (nvml::device_get_power != nullptr &&
+				nvml::device_get_power(device, &power_milliwatt) == nvml::NVML_SUCCESS)
+			{
+				gpu.power = static_cast<float>(power_milliwatt) / 1000.0f;
+				gpu.power_valid = true;
+				g_prev_energy_valid[i] = false;
+			}
+			else if (nvml::device_get_energy != nullptr)
+			{
+				// Derive power from an energy delta: [mJ] / [ms] == [W]
+				uint64_t energy_millijoule = 0;
+				if (nvml::device_get_energy(device, &energy_millijoule) == nvml::NVML_SUCCESS)
+				{
+					if (g_prev_energy_valid[i] && now > g_prev_energy_tick[i].QuadPart && energy_millijoule > g_prev_energy[i])
+					{
+						const uint64_t tick_delta = now - g_prev_energy_tick[i].QuadPart;
+						const uint64_t energy_delta = energy_millijoule - g_prev_energy[i];
+						gpu.power = static_cast<float>(energy_delta) / static_cast<float>(tick_delta);
+						gpu.power_valid = true;
+					}
+					g_prev_energy_tick[i].QuadPart = now;
+					g_prev_energy[i] = energy_millijoule;
+					g_prev_energy_valid[i] = true;
+				}
+			}
+
+			uint32_t temperature = 0;
+			if (nvml::device_get_temp != nullptr &&
+				nvml::device_get_temp(device, nvml::NVML_TEMPERATURE_GPU, &temperature) == nvml::NVML_SUCCESS)
+			{
+				gpu.temp = static_cast<int>(temperature);
+				gpu.temp_valid = true;
+			}
+		}
+	}
+	else if (use_gpu_fallback)
+	{
+		next.gpu_fallback_valid = sample_gpu_engine_utilization(&next.gpu_fallback_usage);
+	}
+
+	// Publish
+	AcquireSRWLockExclusive(&g_snapshot_lock);
+	g_snapshot = next;
+	ReleaseSRWLockExclusive(&g_snapshot_lock);
+}
+
+static std::atomic<bool> g_sampler_once_flag { false };
+static HANDLE g_sampler_stop_event = nullptr;
+static HANDLE g_sampler_thread = nullptr;
+
+static DWORD WINAPI sampler_thread(LPVOID)
+{
+	for (;;)
+	{
+		const DWORD wait_result = WaitForSingleObject(g_sampler_stop_event, static_cast<DWORD>(g_interval_ms.load()));
+		if (wait_result == WAIT_OBJECT_0)
+			break;
+		update_snapshot();
+	}
+	return 0;
+}
+
+static void start_sampler_thread()
+{
+	bool expected = false;
+	if (g_sampler_once_flag.compare_exchange_strong(expected, true))
+	{
+		g_sampler_stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+		g_sampler_thread = CreateThread(nullptr, 0, sampler_thread, nullptr, 0, nullptr);
+		if (g_sampler_thread == nullptr)
+		{
+			if (g_sampler_stop_event != nullptr)
+				CloseHandle(g_sampler_stop_event);
+			g_sampler_stop_event = nullptr;
+			g_sampler_once_flag = false;
+		}
+	}
+}
+
+// --------------------------------------------------------------- OSD
+
+static const ImVec4 color_for_percent(float percent)
+{
+	if (percent >= 90.0f)
+		return ImVec4(1.00f, 0.36f, 0.36f, 1.0f);
+	if (percent >= 60.0f)
+		return ImVec4(1.00f, 0.78f, 0.25f, 1.0f);
+	return ImVec4(0.63f, 0.93f, 0.65f, 1.0f);
+}
+
+static void format_line(char *buffer, size_t size, const char *label, float usage, float watts, bool with_power, int temp, bool with_temp)
+{
+	int offset = snprintf(buffer, size, "%s %5.1f%%", label, usage);
+	if (offset < 0 || static_cast<size_t>(offset) >= size)
+		return;
+	if (with_power)
+	{
+		const int written = snprintf(buffer + offset, size - offset, "  %4.0f W", watts);
+		if (written < 0 || static_cast<size_t>(written) >= size - offset)
+			return;
+		offset += written;
+	}
+	if (with_temp)
+		snprintf(buffer + offset, size - offset, "  %3d C", temp);
+}
+
+static void draw_osd(reshade::api::effect_runtime *)
+{
+	if (!g_show_cpu_usage && !g_show_gpu_usage)
+		return;
+
+	AcquireSRWLockShared(&g_snapshot_lock);
+	StatsSnapshot snapshot = g_snapshot;
+	ReleaseSRWLockShared(&g_snapshot_lock);
+
+	char text[128];
+
+	if (g_show_cpu_usage)
+	{
+		if (snapshot.cpu_usage_valid)
+		{
+			format_line(text, sizeof(text), "CPU", snapshot.cpu_usage,
+				snapshot.cpu_power, g_show_power && snapshot.cpu_power_valid,
+				0, false);
+			ImGui::TextColored(color_for_percent(snapshot.cpu_usage), "%s", text);
+		}
+		else
+		{
+			ImGui::TextDisabled("CPU ...");
+		}
+	}
+
+	if (!g_show_gpu_usage)
+		return;
+
+	if (snapshot.has_nvidia)
+	{
+		for (int i = 0; i < snapshot.gpu_count && i < kMaxGpus; ++i)
+		{
+			const GpuSample &gpu = snapshot.gpus[i];
+			if (!gpu.usage_valid)
+				continue;
+
+			char label[12];
+			if (snapshot.gpu_count > 1)
+				snprintf(label, sizeof(label), "GPU%d", i);
+			else
+				snprintf(label, sizeof(label), "GPU");
+
+			format_line(text, sizeof(text), label, gpu.usage,
+				gpu.power, g_show_power && gpu.power_valid,
+				gpu.temp, g_show_temp && gpu.temp_valid);
+			ImGui::TextColored(color_for_percent(gpu.usage), "%s", text);
+		}
+	}
+	else if (snapshot.gpu_fallback_valid)
+	{
+		format_line(text, sizeof(text), "GPU", snapshot.gpu_fallback_usage, 0.0f, false, 0, false);
+		ImGui::TextColored(color_for_percent(snapshot.gpu_fallback_usage), "%s", text);
+	}
+	else
+	{
+		ImGui::TextDisabled("GPU ...");
+	}
+}
+
+// --------------------------------------------------------------- settings
+
+static int g_interval_config = 1000;
+
+static void save_config(reshade::api::effect_runtime *runtime)
+{
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCPU", g_show_cpu_usage);
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowGPU", g_show_gpu_usage);
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowTemp", g_show_temp);
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowPower", g_show_power);
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "RefreshIntervalMs", static_cast<int>(g_interval_ms.load()));
+}
+
+static void load_config()
+{
+	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowCPU", g_show_cpu_usage);
+	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowGPU", g_show_gpu_usage);
+	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowTemp", g_show_temp);
+	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowPower", g_show_power);
+
+	if (reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "RefreshIntervalMs", g_interval_config) &&
+		g_interval_config >= 100 && g_interval_config <= 10000)
+	{
+		g_interval_ms = static_cast<uint32_t>(g_interval_config);
+	}
+	else
+	{
+		g_interval_config = 1000;
+	}
+}
+
+static void draw_settings(reshade::api::effect_runtime *runtime)
+{
+	if (ImGui::Checkbox("Show CPU usage", &g_show_cpu_usage))
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCPU", g_show_cpu_usage);
+	if (ImGui::Checkbox("Show GPU usage", &g_show_gpu_usage))
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowGPU", g_show_gpu_usage);
+	if (ImGui::Checkbox("Show GPU temperature", &g_show_temp))
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowTemp", g_show_temp);
+	if (ImGui::Checkbox("Show power draw", &g_show_power))
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowPower", g_show_power);
+
+	if (ImGui::SliderInt("Refresh interval (ms)", &g_interval_config, 100, 10000))
+	{
+		g_interval_ms = static_cast<uint32_t>(g_interval_config);
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "RefreshIntervalMs", g_interval_config);
+	}
+
+	ImGui::Spacing();
+	ImGui::SeparatorText("Data sources");
+	if (g_nvml_device_count > 0)
+		ImGui::TextDisabled("NVML: %d NVIDIA GPU(s) found.", g_nvml_device_count);
+	else
+		ImGui::TextDisabled("NVML: no NVIDIA GPU found.");
+
+	if (g_pdh_cpu_power_available)
+		ImGui::TextDisabled("CPU package power counter is available.");
+	else
+		ImGui::TextDisabled("CPU package power counter is unavailable on this system.");
+
+	ImGui::TextDisabled("GPU power and temperature require NVIDIA NVML (other GPUs report usage only).");
+}
+
+// --------------------------------------------------------------- events
+
+static void on_present(reshade::api::effect_runtime *)
+{
+	start_sampler_thread();
+}
+
+// --------------------------------------------------------------- add-on info
+
+extern "C" __declspec(dllexport) const char *NAME = "Performance HUD";
+extern "C" __declspec(dllexport) const char *AUTHOR = "reshade-better-color-and-texture";
+extern "C" __declspec(dllexport) const char *DESCRIPTION = "Shows CPU and GPU usage plus power draw on the always-visible ReShade on-screen display.";
+extern "C" __declspec(dllexport) const char *WEBSITE = "https://github.com/kless/reshade-better-color-and-texture";
+
+static void init()
+{
+	load_config();
+	load_nvml();
+	load_pdh();
+
+	reshade::register_overlay("OSD", &draw_osd);
+	reshade::register_overlay(nullptr, &draw_settings);
+	reshade::register_event<reshade::addon_event::reshade_present>(&on_present);
+}
+
+static void shutdown()
+{
+	reshade::unregister_event<reshade::addon_event::reshade_present>(&on_present);
+	reshade::unregister_overlay(nullptr, &draw_settings);
+	reshade::unregister_overlay("OSD", &draw_osd);
+
+	// Ask the sampler thread to stop. It is deliberately not joined from within
+	// DllMain (which would risk a loader lock deadlock); it exits on its own at
+	// the next tick.
+	if (g_sampler_stop_event != nullptr)
+		SetEvent(g_sampler_stop_event);
+}
+
+extern "C" BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
+{
+	switch (reason)
+	{
+	case DLL_PROCESS_ATTACH:
+		DisableThreadLibraryCalls(instance);
+		if (!reshade::register_addon(instance))
+			return FALSE; // ReShade version does not support this add-on API
+		init();
+		break;
+	case DLL_PROCESS_DETACH:
+		if (reserved != nullptr) // static process termination, nothing to clean up
+			break;
+		shutdown();
+		break;
+	}
+	return TRUE;
+}
