@@ -114,7 +114,7 @@ static bool    g_show_fps = true;
 static bool    g_smooth_motion = false;       // double FPS stats (e.g. NVIDIA Smooth Motion)
 static bool    g_show_battery = true;
 static constexpr float g_hud_pos_x = 8.0f;   // distance from the left screen edge, in pixels
-static float g_hud_pos_y = 0.0f;          // distance from the top screen edge, in pixels (configurable)
+static float g_hud_pos_y = 0.0f;          // vertical offset from the top screen edge, in pixels (positive or negative)
 static float g_hud_scale = 2.0f;          // font scale of the OSD text
 static float g_hud_color[4] = { 1.0f, 1.0f, 1.0f, 0.667f }; // #FFFFFFAA
 static bool g_use_threshold_colors = true; // color usage lines by load level
@@ -1069,7 +1069,7 @@ static void load_config()
 		g_hud_scale = 2.0f;
 
 	if (reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "HudPosY", g_hud_pos_y) &&
-		(g_hud_pos_y < 0.0f || g_hud_pos_y > 10000.0f))
+		(g_hud_pos_y < -10000.0f || g_hud_pos_y > 10000.0f))
 		g_hud_pos_y = 0.0f;
 
 	char color_string[64];
@@ -1155,7 +1155,7 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 	}
 
 	ImGui::Spacing();
-	if (ImGui::SliderFloat("HUD y offset##perfhud", &g_hud_pos_y, 0.0f, 2000.0f, "%.0f px"))
+	if (ImGui::SliderFloat("HUD y offset##perfhud", &g_hud_pos_y, -2000.0f, 2000.0f, "%.0f px"))
 	{
 		// Snap to whole pixels
 		g_hud_pos_y = std::round(g_hud_pos_y);
