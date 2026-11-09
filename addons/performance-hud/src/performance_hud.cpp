@@ -11,9 +11,6 @@
  *                    (only shown when the system provides the counter)
  *  - CPU temp:       PDH counter \Processor Information(_Total)\Temperature
  *                    Data (Kelvin or tenths-of-Kelvin, converted to Celsius)
- *  - CPU turbo boost: CallNtPowerInformation(ProcessorInformation), reporting
- *                    the highest current clock across all logical processors
- *                    (the boost clock reached when any core is boosting)
  *  - RAM usage:      GlobalMemoryStatusEx (physical memory in use)
  *  - GPU usage:      NVML (NVIDIA) with PDH \GPU Engine(*)\Utilization
  *                    Percentage fallback (what Task Manager uses, Windows 10+)
@@ -34,7 +31,6 @@
 
 #include <pdh.h>
 #include <pdhmsg.h>
-#include <powrprof.h>
 
 #include <algorithm>
 #include <atomic>
@@ -88,9 +84,6 @@ struct StatsSnapshot
 	float cpu_power;          // watts
 	bool  cpu_temp_valid;
 	float cpu_temp;           // degrees celsius
-	bool  cpu_freq_valid;
-	float cpu_freq_min_ghz;   // lowest current clock across all cores
-	float cpu_freq_max_ghz;   // highest current clock across all cores
 	bool  ram_usage_valid;
 	float ram_used_gb;        // physical memory in use
 	bool  gpu_fallback_valid; // PDH GPU Engine counters are in use
@@ -114,11 +107,10 @@ static bool g_show_temp = true;
 static bool g_show_power = true;
 static bool g_show_vram = true;
 static bool g_show_ram = true;
-static bool g_show_cpu_freq = true;
 static bool    g_show_fps = true;
 static constexpr float g_hud_pos[2] = { 8.0f, 0.0f }; // fixed on-screen position of the HUD
 static float g_hud_scale = 2.0f;          // font scale of the OSD text
-static float g_hud_color[4] = { 0.467f, 0.467f, 0.467f, 1.0f }; // #777777
+static float g_hud_color[4] = { 1.0f, 1.0f, 1.0f, 0.8f }; // #FFFFFFCC
 static bool g_use_threshold_colors = true; // color usage lines by load level
 static std::atomic<uint32_t> g_interval_ms { 1000 };
 
@@ -130,7 +122,7 @@ namespace nvml
 	constexpr int NVML_TEMPERATURE_GPU = 0;
 
 	struct Utilization { uint32_t gpu; uint32_t memory; };
-	struct MemoryInfo { uint64_t total_kib; uint64_t free_kib; uint64_t used_kib; };
+	struct MemoryInfo { uint64_t total_bytes; uint64_t free_bytes; uint64_t used_bytes; };
 
 	using Init_t =            int (*)();
 	using Shutdown_t =        int (*)();
@@ -368,53 +360,6 @@ static bool sample_cpu_temp(float *out_celsius)
 	return true;
 }
 
-// Reports the lowest and highest current clock rate across all logical
-// processors, using CallNtPowerInformation's per-processor power information.
-static bool sample_cpu_frequency(float *out_min_ghz, float *out_max_ghz)
-{
-	struct ProcessorPowerInfo
-	{
-		ULONG number;           // 0-based processor number
-		ULONG max_mhz;          // maximum clock, in MHz
-		ULONG current_mhz;      // current clock, in MHz (may differ slightly)
-		ULONG mhz_limit;        // clock limit, in MHz
-		ULONG max_idle_state;
-		ULONG current_idle_state;
-	};
-	static_assert(sizeof(ProcessorPowerInfo) == 24, "unexpected struct layout");
-
-	// The API fills one entry per logical processor, so the buffer must cover
-	// all of them.
-	constexpr size_t kMaxEntries = 1024;
-	BYTE buffer[kMaxEntries * sizeof(ProcessorPowerInfo)];
-	if (CallNtPowerInformation(ProcessorInformation, nullptr, 0, buffer, sizeof(buffer)) != ERROR_SUCCESS)
-		return false;
-
-	DWORD processor_count = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
-	if (processor_count == 0 || processor_count > kMaxEntries)
-		processor_count = static_cast<DWORD>(kMaxEntries);
-
-	ULONG min_mhz = 0;
-	ULONG max_mhz = 0;
-	for (DWORD i = 0; i < processor_count; ++i)
-	{
-		ProcessorPowerInfo entry;
-		memcpy(&entry, buffer + i * sizeof(ProcessorPowerInfo), sizeof(entry));
-		if (entry.current_mhz == 0)
-			continue;
-		if (min_mhz == 0 || entry.current_mhz < min_mhz)
-			min_mhz = entry.current_mhz;
-		if (entry.current_mhz > max_mhz)
-			max_mhz = entry.current_mhz;
-	}
-	if (max_mhz == 0)
-		return false;
-
-	*out_min_ghz = static_cast<float>(min_mhz) / 1000.0f;
-	*out_max_ghz = static_cast<float>(max_mhz) / 1000.0f;
-	return true;
-}
-
 // Reports the physical RAM in use system-wide, via GlobalMemoryStatusEx.
 static bool sample_ram_usage(float *out_gb)
 {
@@ -612,7 +557,6 @@ static void update_snapshot()
 	next.cpu_power_valid = sample_cpu_power(&next.cpu_power);
 	next.cpu_power_valid = (next.cpu_power_valid && next.cpu_power >= 0.0f);
 	next.cpu_temp_valid = sample_cpu_temp(&next.cpu_temp);
-	next.cpu_freq_valid = sample_cpu_frequency(&next.cpu_freq_min_ghz, &next.cpu_freq_max_ghz);
 	next.ram_usage_valid = sample_ram_usage(&next.ram_used_gb);
 
 	if (g_nvml_device_count > 0)
@@ -673,11 +617,12 @@ static void update_snapshot()
 
 			nvml::MemoryInfo mem = { 0, 0, 0 };
 			if (nvml::device_get_mem_info != nullptr &&
-				nvml::device_get_mem_info(device, &mem) == nvml::NVML_SUCCESS && mem.total_kib > 0)
+				nvml::device_get_mem_info(device, &mem) == nvml::NVML_SUCCESS && mem.total_bytes > 0)
 			{
-				constexpr float kib_to_gib = 1.0f / (1024.0f * 1024.0f);
-				gpu.vram_used_gb = static_cast<float>(mem.used_kib) * kib_to_gib;
-				gpu.vram_total_gb = static_cast<float>(mem.total_kib) * kib_to_gib;
+				// NVML reports memory in bytes
+				constexpr float bytes_to_gib = 1.0f / (1024.0f * 1024.0f * 1024.0f);
+				gpu.vram_used_gb = static_cast<float>(mem.used_bytes) * bytes_to_gib;
+				gpu.vram_total_gb = static_cast<float>(mem.total_bytes) * bytes_to_gib;
 				gpu.vram_valid = true;
 			}
 		}
@@ -895,20 +840,6 @@ static void draw_cpu_lines(const StatsSnapshot &snapshot)
 		draw_metric_line(base_color(), value, "w");
 	}
 
-	if (g_show_cpu_freq)
-	{
-		if (snapshot.cpu_freq_valid)
-		{
-			char value[16];
-			snprintf(value, sizeof(value), "%.2f-%.2f", snapshot.cpu_freq_min_ghz, snapshot.cpu_freq_max_ghz);
-			draw_metric_line(base_color(), value, "ghz");
-		}
-		else if (!snapshot.cpu_usage_valid)
-		{
-			draw_metric_placeholder("ghz");
-		}
-	}
-
 	if (g_show_cpu_temp && snapshot.cpu_temp_valid)
 	{
 		char value[16];
@@ -988,14 +919,14 @@ static void draw_gpu_lines(const StatsSnapshot &snapshot)
 			{
 				char value[16];
 				snprintf(value, sizeof(value), "%.0f", gpu.power);
-				draw_metric_line(base_color(), value, "w");
+				draw_metric_line(base_color(), value, "GPUp");
 			}
 
 			if (g_show_temp && gpu.temp_valid)
 			{
 				char value[16];
 				snprintf(value, sizeof(value), "%d", gpu.temp);
-				draw_metric_line(base_color(), value, "c");
+				draw_metric_line(base_color(), value, "GPUt");
 			}
 
 			if (!gpu.usage_valid && !(g_show_power && gpu.power_valid) &&
@@ -1034,7 +965,7 @@ static void draw_gpu_lines(const StatsSnapshot &snapshot)
 static void draw_osd(reshade::api::effect_runtime *)
 {
 	if (!g_show_cpu_usage && !g_show_gpu_usage && !g_show_cpu_temp && !g_show_temp &&
-		!g_show_power && !g_show_vram && !g_show_ram && !g_show_cpu_freq && !g_show_fps)
+		!g_show_power && !g_show_vram && !g_show_ram && !g_show_fps)
 		return;
 
 	// Scales the OSD text. PushFont(nullptr, FontSizeBase * scale) is the
@@ -1071,7 +1002,6 @@ static void save_config(reshade::api::effect_runtime *runtime)
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowPower", g_show_power);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowVram", g_show_vram);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowRam", g_show_ram);
-	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCpuFrequency", g_show_cpu_freq);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowFps", g_show_fps);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudScale", g_hud_scale);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
@@ -1092,7 +1022,6 @@ static void load_config()
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowPower", g_show_power);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowVram", g_show_vram);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowRam", g_show_ram);
-	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowCpuFrequency", g_show_cpu_freq);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowFps", g_show_fps);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
 
@@ -1142,8 +1071,6 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowVram", g_show_vram);
 	if (ImGui::Checkbox("Show RAM usage", &g_show_ram))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowRam", g_show_ram);
-	if (ImGui::Checkbox("Show CPU clock (min-max across cores)", &g_show_cpu_freq))
-		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCpuFrequency", g_show_cpu_freq);
 	if (ImGui::Checkbox("Show FPS and 1%%/0.1%% low", &g_show_fps))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowFps", g_show_fps);
 
@@ -1217,7 +1144,7 @@ static void on_present(reshade::api::effect_runtime *)
 
 extern "C" __declspec(dllexport) const char *NAME = "Performance HUD";
 extern "C" __declspec(dllexport) const char *AUTHOR = "reshade-better-color-and-texture";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Shows CPU/GPU usage, power draw, temperatures, CPU turbo boost clock, VRAM/RAM usage and FPS with 1%/0.1% low stats (10 second window) in a single column on the always-visible ReShade on-screen display.";
+extern "C" __declspec(dllexport) const char *DESCRIPTION = "Shows CPU/GPU usage, power draw, temperatures, VRAM/RAM usage and FPS with 1%/0.1% low stats (10 second window) in a single column on the always-visible ReShade on-screen display.";
 extern "C" __declspec(dllexport) const char *WEBSITE = "https://github.com/kless/reshade-better-color-and-texture";
 
 static void init()

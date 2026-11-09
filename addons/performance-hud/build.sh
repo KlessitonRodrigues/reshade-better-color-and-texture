@@ -33,7 +33,6 @@ MINGW_PREFIX="${MINGW_PREFIX:-x86_64-w64-mingw32}"
 	-Iinclude \
 	-static \
 	-lpdh \
-	-lpowrprof \
 	-Wl,--nxcompat,--dynamicbase,--high-entropy-va
 
 echo "Built $(pwd)/PerformanceHUD.addon64"

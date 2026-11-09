@@ -3,7 +3,7 @@ project(PerformanceHUD LANGUAGES CXX)
 
 add_library(performance_hud SHARED src/performance_hud.cpp)
 target_include_directories(performance_hud PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(performance_hud PRIVATE pdh powrprof)
+target_link_libraries(performance_hud PRIVATE pdh)
 
 if(MSVC)
 	target_compile_options(performance_hud PRIVATE /W4)
