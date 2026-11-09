@@ -115,7 +115,7 @@ static bool    g_smooth_motion = false;       // double FPS stats (e.g. NVIDIA S
 static bool    g_show_battery = true;
 static constexpr float g_hud_pos_x = 8.0f;   // distance from the left screen edge, in pixels
 static float g_hud_pos_y = 0.0f;          // vertical offset from the top screen edge, in pixels (positive or negative)
-static float g_hud_scale = 2.0f;          // font scale of the OSD text
+static float g_hud_scale = 1.0f;          // font scale of the OSD text (ReShade's global font size provides the base resolution)
 static float g_hud_color[4] = { 1.0f, 1.0f, 1.0f, 0.667f }; // #FFFFFFAA
 static bool g_use_threshold_colors = true; // color usage lines by load level
 static std::atomic<uint32_t> g_interval_ms { 1000 };
@@ -1066,7 +1066,7 @@ static void load_config()
 
 	if (reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "HudScale", g_hud_scale) &&
 		(g_hud_scale < 0.25f || g_hud_scale > 4.0f))
-		g_hud_scale = 2.0f;
+		g_hud_scale = 1.0f;
 
 	if (reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "HudPosY", g_hud_pos_y) &&
 		(g_hud_pos_y < -10000.0f || g_hud_pos_y > 10000.0f))
