@@ -115,6 +115,8 @@ static bool    g_show_battery = true;
 static constexpr float g_hud_pos[2] = { 8.0f, 0.0f }; // fixed on-screen position of the HUD
 static float g_hud_scale = 2.0f;          // font scale of the OSD text
 static float g_hud_color[4] = { 1.0f, 1.0f, 1.0f, 0.8f }; // #FFFFFFCC
+static float g_hud_bg_color[4] = { 0.0f, 0.0f, 0.0f, 0.133f }; // #00000022
+static constexpr float g_hud_bg_padding = 4.0f;               // pixels around the text block
 static bool g_use_threshold_colors = true; // color usage lines by load level
 static std::atomic<uint32_t> g_interval_ms { 1000 };
 
@@ -816,9 +818,15 @@ static const ImVec4 line_color(float percent)
 }
 
 // Single-column layout: every line is "value label", e.g. "60% cpu".
+static ImVec2 g_hud_text_max;   // bottom-right corner of the text block, this frame
+static ImVec2 g_hud_last_text_max; // same, from the previous frame (background sizing)
 static void draw_metric_line(const ImVec4 &color, const char *value, const char *label)
 {
 	ImGui::TextColored(color, "%s %s", value, label);
+	// Track the bounds of the text block for the background rectangle
+	const ImVec2 item_max = ImGui::GetItemRectMax();
+	g_hud_text_max.x = std::max(g_hud_text_max.x, item_max.x);
+	g_hud_text_max.y = item_max.y;
 }
 
 static void draw_metric_placeholder(const char *label)
@@ -1008,11 +1016,25 @@ static void draw_osd(reshade::api::effect_runtime *)
 	StatsSnapshot snapshot = g_snapshot;
 	ReleaseSRWLockShared(&g_snapshot_lock);
 
+	// The background is drawn before the text, sized from the text block of
+	// the previous frame (one frame of lag, not noticeable).
+	ImDrawList *draw_list = ImGui::GetWindowDrawList();
+	const ImVec2 origin = ImGui::GetCursorScreenPos();
+	if (g_hud_last_text_max.x > origin.x)
+	{
+		const ImVec2 bg_min(origin.x - g_hud_bg_padding, origin.y - g_hud_bg_padding);
+		const ImVec2 bg_max(g_hud_last_text_max.x + g_hud_bg_padding, g_hud_last_text_max.y + g_hud_bg_padding);
+		draw_list->AddRectFilled(bg_min, bg_max, ImGui::GetColorU32(ImVec4(g_hud_bg_color[0], g_hud_bg_color[1], g_hud_bg_color[2], g_hud_bg_color[3])));
+	}
+	g_hud_text_max = origin;
+
 	if (g_show_fps)
 		draw_fps_lines(nullptr);
 
 	draw_cpu_lines(snapshot);
 	draw_gpu_lines(snapshot);
+
+	g_hud_last_text_max = g_hud_text_max;
 
 	ImGui::PopFont();
 }
@@ -1039,6 +1061,9 @@ static void save_config(reshade::api::effect_runtime *runtime)
 	snprintf(color_string, sizeof(color_string), "%.3f,%.3f,%.3f,%.3f",
 		g_hud_color[0], g_hud_color[1], g_hud_color[2], g_hud_color[3]);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudColor", static_cast<const char *>(color_string));
+	snprintf(color_string, sizeof(color_string), "%.3f,%.3f,%.3f,%.3f",
+		g_hud_bg_color[0], g_hud_bg_color[1], g_hud_bg_color[2], g_hud_bg_color[3]);
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "BackgroundColor", static_cast<const char *>(color_string));
 }
 
 static void load_config()
@@ -1070,6 +1095,19 @@ static void load_config()
 			g_hud_color[1] = (g < 0.0f ? 0.0f : g > 1.0f ? 1.0f : g);
 			g_hud_color[2] = (b < 0.0f ? 0.0f : b > 1.0f ? 1.0f : b);
 			g_hud_color[3] = (a < 0.0f ? 0.0f : a > 1.0f ? 1.0f : a);
+		}
+	}
+
+	color_length = sizeof(color_string) - 1;
+	if (reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "BackgroundColor", color_string, &color_length))
+	{
+		float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
+		if (sscanf(color_string, "%f,%f,%f,%f", &r, &g, &b, &a) == 4)
+		{
+			g_hud_bg_color[0] = (r < 0.0f ? 0.0f : r > 1.0f ? 1.0f : r);
+			g_hud_bg_color[1] = (g < 0.0f ? 0.0f : g > 1.0f ? 1.0f : g);
+			g_hud_bg_color[2] = (b < 0.0f ? 0.0f : b > 1.0f ? 1.0f : b);
+			g_hud_bg_color[3] = (a < 0.0f ? 0.0f : a > 1.0f ? 1.0f : a);
 		}
 	}
 
@@ -1125,6 +1163,13 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 		snprintf(color_string, sizeof(color_string), "%.3f,%.3f,%.3f,%.3f",
 			g_hud_color[0], g_hud_color[1], g_hud_color[2], g_hud_color[3]);
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudColor", static_cast<const char *>(color_string));
+	}
+	if (ImGui::ColorEdit4("Background color", g_hud_bg_color))
+	{
+		char color_string[64];
+		snprintf(color_string, sizeof(color_string), "%.3f,%.3f,%.3f,%.3f",
+			g_hud_bg_color[0], g_hud_bg_color[1], g_hud_bg_color[2], g_hud_bg_color[3]);
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "BackgroundColor", static_cast<const char *>(color_string));
 	}
 
 	if (ImGui::SliderInt("Refresh interval (ms)", &g_interval_config, 100, 10000))
