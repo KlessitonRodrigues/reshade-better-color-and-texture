@@ -112,7 +112,8 @@ static bool g_show_ram = true;
 static bool    g_show_fps = true;
 static bool    g_smooth_motion = false;       // double FPS stats (e.g. NVIDIA Smooth Motion)
 static bool    g_show_battery = true;
-static constexpr float g_hud_pos[2] = { 0.0f, 0.0f }; // fixed on-screen position of the HUD
+static float g_hud_pos_x = 0.0f;          // horizontal offset of the HUD from the left edge, in pixels
+static float g_hud_pos_y = 0.0f;          // vertical offset of the HUD from the top edge, in pixels
 static float g_hud_scale = 2.0f;          // font scale of the OSD text
 static float g_hud_color[4] = { 1.0f, 1.0f, 1.0f, 0.8f }; // #FFFFFFCC
 static bool g_use_threshold_colors = true; // color usage lines by load level
@@ -1004,7 +1005,7 @@ static void draw_osd(reshade::api::effect_runtime *)
 
 	// Moves the HUD to its configured on-screen position, relative to the
 	// content area of the overlay window.
-	ImGui::SetCursorPos(ImVec2(g_hud_pos[0], g_hud_pos[1]));
+	ImGui::SetCursorPos(ImVec2(g_hud_pos_x, g_hud_pos_y));
 
 	AcquireSRWLockShared(&g_snapshot_lock);
 	StatsSnapshot snapshot = g_snapshot;
@@ -1035,6 +1036,8 @@ static void save_config(reshade::api::effect_runtime *runtime)
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowRam", g_show_ram);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowFps", g_show_fps);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudScale", g_hud_scale);
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudPosX", g_hud_pos_x);
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudPosY", g_hud_pos_y);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "RefreshIntervalMs", static_cast<int>(g_interval_ms.load()));
 
@@ -1058,6 +1061,8 @@ static void load_config()
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "SmoothMotion", g_smooth_motion);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
 
+	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "HudPosX", g_hud_pos_x);
+	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "HudPosY", g_hud_pos_y);
 	if (reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "HudScale", g_hud_scale) &&
 		(g_hud_scale < 0.25f || g_hud_scale > 4.0f))
 		g_hud_scale = 2.0f;
@@ -1120,6 +1125,10 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 	ImGui::SeparatorText("Appearance");
 	if (ImGui::SliderFloat("HUD scale##perfhud", &g_hud_scale, 0.5f, 3.0f, "%.2fx"))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudScale", g_hud_scale);
+	if (ImGui::SliderFloat("X offset (px)##perfhud", &g_hud_pos_x, 0.0f, 1000.0f, "%.0f"))
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudPosX", g_hud_pos_x);
+	if (ImGui::SliderFloat("Y offset (px)##perfhud", &g_hud_pos_y, 0.0f, 1000.0f, "%.0f"))
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudPosY", g_hud_pos_y);
 	if (ImGui::Checkbox("Color lines by load", &g_use_threshold_colors))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
 	if (ImGui::ColorEdit4("Base text color", g_hud_color))
