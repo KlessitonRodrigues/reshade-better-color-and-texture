@@ -818,22 +818,9 @@ static const ImVec4 line_color(float percent)
 }
 
 // Single-column layout: every line is "value label", e.g. "60% cpu".
-// The value is drawn at the configured HUD scale while the label stays at the
-// base 1x font size, baseline-aligned with the value.
 static void draw_metric_line(const ImVec4 &color, const char *value, const char *label)
 {
-	ImGui::TextColored(color, "%s", value);
-
-	// Baseline alignment: shift the smaller text down by the ascent difference
-	// between the two font sizes, so both share the same text baseline.
-	const float value_ascent = ImGui::GetFontBaked()->Ascent;
-
-	ImGui::SameLine();
-	ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase);
-	const float label_ascent = ImGui::GetFontBaked()->Ascent;
-	ImGui::SetCursorPosY(ImGui::GetCursorPosY() + value_ascent - label_ascent);
-	ImGui::TextColored(color, "%s", label);
-	ImGui::PopFont();
+	ImGui::TextColored(color, "%s %s", value, label);
 }
 
 static void draw_metric_placeholder(const char *label)
@@ -1153,9 +1140,10 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudColor", static_cast<const char *>(color_string));
 	}
 
-	if (ImGui::SliderInt("Refresh interval (ms)", &g_interval_config, 100, 10000))
+	if (ImGui::InputInt("Refresh interval (ms)", &g_interval_config, 100))
 	{
-		// Snap to 100 ms steps
+		// Snap to 100 ms steps and clamp to the supported range
+		g_interval_config = std::clamp(g_interval_config, 100, 10000);
 		g_interval_config = (g_interval_config / 100) * 100;
 		g_interval_ms = static_cast<uint32_t>(g_interval_config);
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "RefreshIntervalMs", g_interval_config);
@@ -1215,7 +1203,7 @@ static void on_present(reshade::api::effect_runtime *)
 
 extern "C" __declspec(dllexport) const char *NAME = "Performance HUD";
 extern "C" __declspec(dllexport) const char *AUTHOR = "reshade-better-color-and-texture";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Shows CPU/GPU usage, power draw, temperatures, VRAM/RAM usage and FPS with 1%/0.1% low stats (10 second window) in a single column on the always-visible ReShade on-screen display. To change the HUD position, go to Settings > Overlay > \"OSD position on screen\".";
+extern "C" __declspec(dllexport) const char *DESCRIPTION = "Shows CPU/GPU usage, power draw, temperatures, VRAM/RAM usage and FPS with 1%/0.1% low stats (10 second window) in a single column on the always-visible ReShade on-screen display.";
 extern "C" __declspec(dllexport) const char *WEBSITE = "https://github.com/kless/reshade-better-color-and-texture";
 
 static void init()
