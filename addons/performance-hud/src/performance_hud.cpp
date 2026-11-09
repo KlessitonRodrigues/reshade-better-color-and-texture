@@ -112,7 +112,7 @@ static bool g_show_ram = true;
 static bool    g_show_fps = true;
 static bool    g_smooth_motion = false;       // double FPS stats (e.g. NVIDIA Smooth Motion)
 static bool    g_show_battery = true;
-static constexpr float g_hud_pos[2] = { 8.0f, 0.0f }; // fixed on-screen position of the HUD
+static constexpr float g_hud_pos[2] = { 0.0f, 0.0f }; // fixed on-screen position of the HUD
 static float g_hud_scale = 2.0f;          // font scale of the OSD text
 static float g_hud_color[4] = { 1.0f, 1.0f, 1.0f, 0.8f }; // #FFFFFFCC
 static bool g_use_threshold_colors = true; // color usage lines by load level
@@ -869,7 +869,7 @@ static void draw_cpu_lines(const StatsSnapshot &snapshot)
 		if (snapshot.ram_usage_valid)
 		{
 			char value[16];
-			snprintf(value, sizeof(value), "%.2f", snapshot.ram_used_gb);
+			snprintf(value, sizeof(value), "%.1f", snapshot.ram_used_gb);
 			draw_metric_line(base_color(), value, "ram");
 		}
 		else
@@ -939,7 +939,7 @@ static void draw_gpu_lines(const StatsSnapshot &snapshot)
 			if (g_show_vram && gpu.vram_valid && gpu.vram_used_gb >= 0.05f)
 			{
 				char value[16];
-				snprintf(value, sizeof(value), "%.2f", gpu.vram_used_gb);
+				snprintf(value, sizeof(value), "%.1f", gpu.vram_used_gb);
 				draw_metric_line(base_color(), value, "vram");
 			}
 
@@ -947,14 +947,14 @@ static void draw_gpu_lines(const StatsSnapshot &snapshot)
 			{
 				char value[16];
 				snprintf(value, sizeof(value), "%.0f", gpu.power);
-				draw_metric_line(base_color(), value, "GPUp");
+				draw_metric_line(base_color(), value, "pow");
 			}
 
 			if (g_show_temp && gpu.temp_valid)
 			{
 				char value[16];
 				snprintf(value, sizeof(value), "%d", gpu.temp);
-				draw_metric_line(base_color(), value, "GPUt");
+				draw_metric_line(base_color(), value, "temp");
 			}
 
 			if (!gpu.usage_valid && !(g_show_power && gpu.power_valid) &&
@@ -980,7 +980,7 @@ static void draw_gpu_lines(const StatsSnapshot &snapshot)
 		if (g_show_vram && snapshot.gpu_fallback_vram_valid)
 		{
 			char value[16];
-			snprintf(value, sizeof(value), "%.2f", snapshot.gpu_fallback_vram_usage);
+			snprintf(value, sizeof(value), "%.1f", snapshot.gpu_fallback_vram_usage);
 			draw_metric_line(base_color(), value, "vram");
 			drew_any = true;
 		}
@@ -999,6 +999,8 @@ static void draw_osd(reshade::api::effect_runtime *)
 	// Scales the OSD text. PushFont(nullptr, FontSizeBase * scale) is the
 	// Dear ImGui 1.92 replacement for the legacy ImGui::SetWindowFontScale.
 	ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * g_hud_scale);
+	// No window padding, so the HUD sits flush with the overlay's top-left edge
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
 
 	// Moves the HUD to its configured on-screen position, relative to the
 	// content area of the overlay window.
@@ -1014,6 +1016,7 @@ static void draw_osd(reshade::api::effect_runtime *)
 	draw_cpu_lines(snapshot);
 	draw_gpu_lines(snapshot);
 
+	ImGui::PopStyleVar();
 	ImGui::PopFont();
 }
 
