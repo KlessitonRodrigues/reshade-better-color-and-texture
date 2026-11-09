@@ -86,6 +86,8 @@ struct StatsSnapshot
 	float cpu_temp;           // degrees celsius
 	bool  ram_usage_valid;
 	float ram_used_gb;        // physical memory in use
+	bool  battery_valid;
+	int   battery_percent;    // 0-100
 	bool  gpu_fallback_valid; // PDH GPU Engine counters are in use
 	float gpu_fallback_usage; // percent 0-100
 	bool  gpu_fallback_vram_valid;
@@ -108,6 +110,7 @@ static bool g_show_power = true;
 static bool g_show_vram = true;
 static bool g_show_ram = true;
 static bool    g_show_fps = true;
+static bool    g_show_battery = true;
 static constexpr float g_hud_pos[2] = { 8.0f, 0.0f }; // fixed on-screen position of the HUD
 static float g_hud_scale = 2.0f;          // font scale of the OSD text
 static float g_hud_color[4] = { 1.0f, 1.0f, 1.0f, 0.8f }; // #FFFFFFCC
@@ -360,6 +363,18 @@ static bool sample_cpu_temp(float *out_celsius)
 	return true;
 }
 
+// Reports the battery charge level. BatteryLifePercent is 255 when unknown
+// and the system has no battery at all, in which case nothing is shown.
+static bool sample_battery(int *out_percent)
+{
+	SYSTEM_POWER_STATUS status;
+	if (!GetSystemPowerStatus(&status) || status.BatteryLifePercent == 255 || status.BatteryLifePercent > 100)
+		return false;
+
+	*out_percent = static_cast<int>(status.BatteryLifePercent);
+	return true;
+}
+
 // Reports the physical RAM in use system-wide, via GlobalMemoryStatusEx.
 static bool sample_ram_usage(float *out_gb)
 {
@@ -558,6 +573,7 @@ static void update_snapshot()
 	next.cpu_power_valid = (next.cpu_power_valid && next.cpu_power >= 0.0f);
 	next.cpu_temp_valid = sample_cpu_temp(&next.cpu_temp);
 	next.ram_usage_valid = sample_ram_usage(&next.ram_used_gb);
+	next.battery_valid = sample_battery(&next.battery_percent);
 
 	if (g_nvml_device_count > 0)
 	{
@@ -860,6 +876,13 @@ static void draw_cpu_lines(const StatsSnapshot &snapshot)
 			draw_metric_placeholder("ram");
 		}
 	}
+
+	if (g_show_battery && snapshot.battery_valid)
+	{
+		char value[16];
+		snprintf(value, sizeof(value), "%d%%", snapshot.battery_percent);
+		draw_metric_line(base_color(), value, "bat");
+	}
 }
 
 static void draw_fps_lines(reshade::api::effect_runtime *)
@@ -965,7 +988,7 @@ static void draw_gpu_lines(const StatsSnapshot &snapshot)
 static void draw_osd(reshade::api::effect_runtime *)
 {
 	if (!g_show_cpu_usage && !g_show_gpu_usage && !g_show_cpu_temp && !g_show_temp &&
-		!g_show_power && !g_show_vram && !g_show_ram && !g_show_fps)
+		!g_show_power && !g_show_vram && !g_show_ram && !g_show_fps && !g_show_battery)
 		return;
 
 	// Scales the OSD text. PushFont(nullptr, FontSizeBase * scale) is the
@@ -1022,6 +1045,7 @@ static void load_config()
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowPower", g_show_power);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowVram", g_show_vram);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowRam", g_show_ram);
+	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowBattery", g_show_battery);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowFps", g_show_fps);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
 
@@ -1071,6 +1095,11 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowVram", g_show_vram);
 	if (ImGui::Checkbox("Show RAM usage", &g_show_ram))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowRam", g_show_ram);
+	if (ImGui::Checkbox("Show battery level", &g_show_battery))
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowBattery", g_show_battery);
+
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowBattery", g_show_battery);
+
 	if (ImGui::Checkbox("Show FPS and 1%%/0.1%% low", &g_show_fps))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowFps", g_show_fps);
 
