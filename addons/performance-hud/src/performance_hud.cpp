@@ -110,6 +110,7 @@ static bool g_show_power = true;
 static bool g_show_vram = true;
 static bool g_show_ram = true;
 static bool    g_show_fps = true;
+static bool    g_smooth_motion = false;       // double FPS stats (e.g. NVIDIA Smooth Motion)
 static bool    g_show_battery = true;
 static constexpr float g_hud_pos[2] = { 8.0f, 0.0f }; // fixed on-screen position of the HUD
 static float g_hud_scale = 2.0f;          // font scale of the OSD text
@@ -899,12 +900,16 @@ static void draw_fps_lines(reshade::api::effect_runtime *)
 	if (!stats.valid)
 		return;
 
+	// Smooth Motion / frame generation presents interpolated frames, so the
+	// presented rate is roughly double the rendered rate.
+	const float scale = g_smooth_motion ? 2.0f : 1.0f;
+
 	char value[16];
-	snprintf(value, sizeof(value), "%.0f", stats.fps);
+	snprintf(value, sizeof(value), "%.0f", stats.fps * scale);
 	draw_metric_line(base_color(), value, "fps");
-	snprintf(value, sizeof(value), "%.0f", stats.low1);
+	snprintf(value, sizeof(value), "%.0f", stats.low1 * scale);
 	draw_metric_line(base_color(), value, "1%");
-	snprintf(value, sizeof(value), "%.0f", stats.low01);
+	snprintf(value, sizeof(value), "%.0f", stats.low01 * scale);
 	draw_metric_line(base_color(), value, "0.1%");
 }
 
@@ -1047,6 +1052,7 @@ static void load_config()
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowRam", g_show_ram);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowBattery", g_show_battery);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowFps", g_show_fps);
+	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "SmoothMotion", g_smooth_motion);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
 
 	if (reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "HudScale", g_hud_scale) &&
@@ -1102,6 +1108,11 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 
 	if (ImGui::Checkbox("Show FPS and 1%%/0.1%% low", &g_show_fps))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowFps", g_show_fps);
+	if (ImGui::Checkbox("Smooth Motion (double FPS stats)", &g_smooth_motion))
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "SmoothMotion", g_smooth_motion);
+
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "SmoothMotion", g_smooth_motion);
+
 
 	ImGui::SeparatorText("Appearance");
 	if (ImGui::SliderFloat("HUD scale##perfhud", &g_hud_scale, 0.5f, 3.0f, "%.2fx"))
