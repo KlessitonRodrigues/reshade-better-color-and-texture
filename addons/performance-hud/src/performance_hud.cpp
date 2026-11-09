@@ -11,9 +11,6 @@
  *                    (only shown when the system provides the counter)
  *  - CPU temp:       PDH counter \Processor Information(_Total)\Temperature
  *                    Data (Kelvin or tenths-of-Kelvin, converted to Celsius)
- *  - CPU turbo boost: CallNtPowerInformation(ProcessorInformation), reporting
- *                    the highest current clock across all logical processors
- *                    (the boost clock reached when any core is boosting)
  *  - RAM usage:      GlobalMemoryStatusEx (physical memory in use)
  *  - GPU usage:      NVML (NVIDIA) with PDH \GPU Engine(*)\Utilization
  *                    Percentage fallback (what Task Manager uses, Windows 10+)
@@ -34,10 +31,10 @@
 
 #include <pdh.h>
 #include <pdhmsg.h>
-#include <powrprof.h>
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -88,11 +85,11 @@ struct StatsSnapshot
 	float cpu_power;          // watts
 	bool  cpu_temp_valid;
 	float cpu_temp;           // degrees celsius
-	bool  cpu_freq_valid;
-	float cpu_freq_min_ghz;   // lowest current clock across all cores
-	float cpu_freq_max_ghz;   // highest current clock across all cores
 	bool  ram_usage_valid;
 	float ram_used_gb;        // physical memory in use
+	float ram_free_gb;        // physical memory still available
+	bool  battery_valid;
+	int   battery_percent;    // 0-100
 	bool  gpu_fallback_valid; // PDH GPU Engine counters are in use
 	float gpu_fallback_usage; // percent 0-100
 	bool  gpu_fallback_vram_valid;
@@ -114,11 +111,13 @@ static bool g_show_temp = true;
 static bool g_show_power = true;
 static bool g_show_vram = true;
 static bool g_show_ram = true;
-static bool g_show_cpu_freq = true;
 static bool    g_show_fps = true;
-static constexpr float g_hud_pos[2] = { 8.0f, 0.0f }; // fixed on-screen position of the HUD
-static float g_hud_scale = 2.0f;          // font scale of the OSD text
-static float g_hud_color[4] = { 0.467f, 0.467f, 0.467f, 1.0f }; // #777777
+static bool    g_smooth_motion = false;       // double FPS stats (e.g. NVIDIA Smooth Motion)
+static bool    g_show_battery = true;
+static constexpr float g_hud_pos_x = 8.0f;   // distance from the left screen edge, in pixels
+static float g_hud_pos_y = 0.0f;          // vertical offset from the top screen edge, in pixels (positive or negative)
+static float g_hud_scale = 1.0f;          // font scale of the OSD text (ReShade's global font size provides the base resolution)
+static float g_hud_color[4] = { 1.0f, 1.0f, 1.0f, 0.667f }; // #FFFFFFAA
 static bool g_use_threshold_colors = true; // color usage lines by load level
 static std::atomic<uint32_t> g_interval_ms { 1000 };
 
@@ -130,7 +129,7 @@ namespace nvml
 	constexpr int NVML_TEMPERATURE_GPU = 0;
 
 	struct Utilization { uint32_t gpu; uint32_t memory; };
-	struct MemoryInfo { uint64_t total_kib; uint64_t free_kib; uint64_t used_kib; };
+	struct MemoryInfo { uint64_t total_bytes; uint64_t free_bytes; uint64_t used_bytes; };
 
 	using Init_t =            int (*)();
 	using Shutdown_t =        int (*)();
@@ -368,55 +367,20 @@ static bool sample_cpu_temp(float *out_celsius)
 	return true;
 }
 
-// Reports the lowest and highest current clock rate across all logical
-// processors, using CallNtPowerInformation's per-processor power information.
-static bool sample_cpu_frequency(float *out_min_ghz, float *out_max_ghz)
+// Reports the battery charge level. BatteryLifePercent is 255 when unknown
+// and the system has no battery at all, in which case nothing is shown.
+static bool sample_battery(int *out_percent)
 {
-	struct ProcessorPowerInfo
-	{
-		ULONG number;           // 0-based processor number
-		ULONG max_mhz;          // maximum clock, in MHz
-		ULONG current_mhz;      // current clock, in MHz (may differ slightly)
-		ULONG mhz_limit;        // clock limit, in MHz
-		ULONG max_idle_state;
-		ULONG current_idle_state;
-	};
-	static_assert(sizeof(ProcessorPowerInfo) == 24, "unexpected struct layout");
-
-	// The API fills one entry per logical processor, so the buffer must cover
-	// all of them.
-	constexpr size_t kMaxEntries = 1024;
-	BYTE buffer[kMaxEntries * sizeof(ProcessorPowerInfo)];
-	if (CallNtPowerInformation(ProcessorInformation, nullptr, 0, buffer, sizeof(buffer)) != ERROR_SUCCESS)
+	SYSTEM_POWER_STATUS status;
+	if (!GetSystemPowerStatus(&status) || status.BatteryLifePercent == 255 || status.BatteryLifePercent > 100)
 		return false;
 
-	DWORD processor_count = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
-	if (processor_count == 0 || processor_count > kMaxEntries)
-		processor_count = static_cast<DWORD>(kMaxEntries);
-
-	ULONG min_mhz = 0;
-	ULONG max_mhz = 0;
-	for (DWORD i = 0; i < processor_count; ++i)
-	{
-		ProcessorPowerInfo entry;
-		memcpy(&entry, buffer + i * sizeof(ProcessorPowerInfo), sizeof(entry));
-		if (entry.current_mhz == 0)
-			continue;
-		if (min_mhz == 0 || entry.current_mhz < min_mhz)
-			min_mhz = entry.current_mhz;
-		if (entry.current_mhz > max_mhz)
-			max_mhz = entry.current_mhz;
-	}
-	if (max_mhz == 0)
-		return false;
-
-	*out_min_ghz = static_cast<float>(min_mhz) / 1000.0f;
-	*out_max_ghz = static_cast<float>(max_mhz) / 1000.0f;
+	*out_percent = static_cast<int>(status.BatteryLifePercent);
 	return true;
 }
 
 // Reports the physical RAM in use system-wide, via GlobalMemoryStatusEx.
-static bool sample_ram_usage(float *out_gb)
+static bool sample_ram_usage(float *out_gb, float *out_free_gb)
 {
 	MEMORYSTATUSEX status = { sizeof(MEMORYSTATUSEX) };
 	if (!GlobalMemoryStatusEx(&status) || status.ullTotalPhys == 0)
@@ -424,6 +388,7 @@ static bool sample_ram_usage(float *out_gb)
 
 	constexpr float bytes_to_gib = 1.0f / (1024.0f * 1024.0f * 1024.0f);
 	*out_gb = static_cast<float>(status.ullTotalPhys - status.ullAvailPhys) * bytes_to_gib;
+	*out_free_gb = static_cast<float>(status.ullAvailPhys) * bytes_to_gib;
 	return true;
 }
 
@@ -612,8 +577,8 @@ static void update_snapshot()
 	next.cpu_power_valid = sample_cpu_power(&next.cpu_power);
 	next.cpu_power_valid = (next.cpu_power_valid && next.cpu_power >= 0.0f);
 	next.cpu_temp_valid = sample_cpu_temp(&next.cpu_temp);
-	next.cpu_freq_valid = sample_cpu_frequency(&next.cpu_freq_min_ghz, &next.cpu_freq_max_ghz);
-	next.ram_usage_valid = sample_ram_usage(&next.ram_used_gb);
+	next.ram_usage_valid = sample_ram_usage(&next.ram_used_gb, &next.ram_free_gb);
+	next.battery_valid = sample_battery(&next.battery_percent);
 
 	if (g_nvml_device_count > 0)
 	{
@@ -673,11 +638,12 @@ static void update_snapshot()
 
 			nvml::MemoryInfo mem = { 0, 0, 0 };
 			if (nvml::device_get_mem_info != nullptr &&
-				nvml::device_get_mem_info(device, &mem) == nvml::NVML_SUCCESS && mem.total_kib > 0)
+				nvml::device_get_mem_info(device, &mem) == nvml::NVML_SUCCESS && mem.total_bytes > 0)
 			{
-				constexpr float kib_to_gib = 1.0f / (1024.0f * 1024.0f);
-				gpu.vram_used_gb = static_cast<float>(mem.used_kib) * kib_to_gib;
-				gpu.vram_total_gb = static_cast<float>(mem.total_kib) * kib_to_gib;
+				// NVML reports memory in bytes
+				constexpr float bytes_to_gib = 1.0f / (1024.0f * 1024.0f * 1024.0f);
+				gpu.vram_used_gb = static_cast<float>(mem.used_bytes) * bytes_to_gib;
+				gpu.vram_total_gb = static_cast<float>(mem.total_bytes) * bytes_to_gib;
 				gpu.vram_valid = true;
 			}
 		}
@@ -853,6 +819,54 @@ static const ImVec4 line_color(float percent)
 	return g_use_threshold_colors ? color_for_percent(percent) : base_color();
 }
 
+// Threshold levels shared by the FPS, memory and temperature lines
+static constexpr int kLevelNone = 0;
+static constexpr int kLevelWarning = 1;
+static constexpr int kLevelCritical = 2;
+
+// FPS counters: 60+ white, below 60 yellow, below 30 red
+static int fps_level(float fps)
+{
+	if (fps < 30.0f)
+		return kLevelCritical;
+	if (fps < 60.0f)
+		return kLevelWarning;
+	return kLevelNone;
+}
+
+// VRAM/RAM lines color by the amount still available: under 1 GB yellow,
+// under 0.5 GB red
+static int mem_available_level(float free_gb)
+{
+	if (free_gb < 0.5f)
+		return kLevelCritical;
+	if (free_gb < 1.0f)
+		return kLevelWarning;
+	return kLevelNone;
+}
+
+// Temperature lines: above 70 C yellow, above 80 C red
+static int temperature_level(float celsius)
+{
+	if (celsius > 80.0f)
+		return kLevelCritical;
+	if (celsius > 70.0f)
+		return kLevelWarning;
+	return kLevelNone;
+}
+
+static const ImVec4 level_color(int level)
+{
+	if (g_use_threshold_colors)
+	{
+		if (level >= kLevelCritical)
+			return ImVec4(1.00f, 0.36f, 0.36f, 1.0f);
+		if (level >= kLevelWarning)
+			return ImVec4(1.00f, 0.78f, 0.25f, 1.0f);
+	}
+	return base_color();
+}
+
 // Single-column layout: every line is "value label", e.g. "60% cpu".
 static void draw_metric_line(const ImVec4 &color, const char *value, const char *label)
 {
@@ -895,63 +909,77 @@ static void draw_cpu_lines(const StatsSnapshot &snapshot)
 		draw_metric_line(base_color(), value, "w");
 	}
 
-	if (g_show_cpu_freq)
+	if (g_show_cpu_temp || (g_use_threshold_colors && snapshot.cpu_temp_valid &&
+		temperature_level(snapshot.cpu_temp) > kLevelNone))
 	{
-		if (snapshot.cpu_freq_valid)
+		if (snapshot.cpu_temp_valid)
 		{
 			char value[16];
-			snprintf(value, sizeof(value), "%.2f-%.2f", snapshot.cpu_freq_min_ghz, snapshot.cpu_freq_max_ghz);
-			draw_metric_line(base_color(), value, "ghz");
-		}
-		else if (!snapshot.cpu_usage_valid)
-		{
-			draw_metric_placeholder("ghz");
+			snprintf(value, sizeof(value), "%d", static_cast<int>(snapshot.cpu_temp + 0.5f));
+			draw_metric_line(level_color(temperature_level(snapshot.cpu_temp)), value, "c");
 		}
 	}
 
-	if (g_show_cpu_temp && snapshot.cpu_temp_valid)
-	{
-		char value[16];
-		snprintf(value, sizeof(value), "%d", static_cast<int>(snapshot.cpu_temp + 0.5f));
-		draw_metric_line(base_color(), value, "c");
-	}
-
-	if (g_show_ram)
+	const bool show_ram_line = g_show_ram || (g_use_threshold_colors && snapshot.ram_usage_valid &&
+		mem_available_level(snapshot.ram_free_gb) > kLevelNone);
+	if (show_ram_line)
 	{
 		if (snapshot.ram_usage_valid)
 		{
 			char value[16];
-			snprintf(value, sizeof(value), "%.2f", snapshot.ram_used_gb);
-			draw_metric_line(base_color(), value, "ram");
+			snprintf(value, sizeof(value), "%.1f", snapshot.ram_used_gb);
+			draw_metric_line(level_color(mem_available_level(snapshot.ram_free_gb)), value, "ram");
 		}
 		else
 		{
 			draw_metric_placeholder("ram");
 		}
 	}
+
+	if (g_show_battery && snapshot.battery_valid)
+	{
+		char value[16];
+		snprintf(value, sizeof(value), "%d%%", snapshot.battery_percent);
+		draw_metric_line(base_color(), value, "bat");
+	}
+}
+
+static FpsStats fps_stats_snapshot()
+{
+	AcquireSRWLockShared(&g_fps_stats_lock);
+	const FpsStats stats = g_fps_stats;
+	ReleaseSRWLockShared(&g_fps_stats_lock);
+	return stats;
 }
 
 static void draw_fps_lines(reshade::api::effect_runtime *)
 {
-	if (!g_show_fps)
-		return;
-
 	update_fps_stats();
 
-	AcquireSRWLockShared(&g_fps_stats_lock);
-	const FpsStats stats = g_fps_stats;
-	ReleaseSRWLockShared(&g_fps_stats_lock);
+	const FpsStats stats = fps_stats_snapshot();
 
 	if (!stats.valid)
 		return;
 
+	// Smooth Motion / frame generation presents interpolated frames, so the
+	// presented rate is roughly double the rendered rate.
+	const float scale = g_smooth_motion ? 2.0f : 1.0f;
+	const float fps = stats.fps * scale;
+	const float low1 = stats.low1 * scale;
+	const float low01 = stats.low01 * scale;
+
+	const bool any_warning = fps_level(fps) > kLevelNone || fps_level(low1) > kLevelNone ||
+		fps_level(low01) > kLevelNone;
+	if (!g_show_fps && !(g_use_threshold_colors && any_warning))
+		return;
+
 	char value[16];
-	snprintf(value, sizeof(value), "%.0f", stats.fps);
-	draw_metric_line(base_color(), value, "fps");
-	snprintf(value, sizeof(value), "%.0f", stats.low1);
-	draw_metric_line(base_color(), value, "1%");
-	snprintf(value, sizeof(value), "%.0f", stats.low01);
-	draw_metric_line(base_color(), value, "0.1%");
+	snprintf(value, sizeof(value), "%.0f", fps);
+	draw_metric_line(level_color(fps_level(fps)), value, "fps");
+	snprintf(value, sizeof(value), "%.0f", low1);
+	draw_metric_line(level_color(fps_level(low1)), value, "1%");
+	snprintf(value, sizeof(value), "%.0f", low01);
+	draw_metric_line(level_color(fps_level(low01)), value, "0.1%");
 }
 
 static void draw_gpu_lines(const StatsSnapshot &snapshot)
@@ -961,8 +989,21 @@ static void draw_gpu_lines(const StatsSnapshot &snapshot)
 		for (int i = 0; i < snapshot.gpu_count && i < kMaxGpus; ++i)
 		{
 			const GpuSample &gpu = snapshot.gpus[i];
-			if (!gpu.usage_valid && !g_show_vram && !g_show_power && !g_show_temp)
-				continue;
+			const bool show_usage = (g_show_gpu_usage && gpu.usage_valid);
+
+			// VRAM colors by the memory that is still available, so a known
+			// total is required; the PDH fallback only reports the used amount
+			const float vram_free_gb = (gpu.vram_valid && gpu.vram_total_gb > 0.0f) ?
+				gpu.vram_total_gb - gpu.vram_used_gb : 0.0f;
+			const int vram_level = (gpu.vram_valid && gpu.vram_total_gb > 0.0f) ?
+				mem_available_level(vram_free_gb) : kLevelNone;
+			const bool show_vram = (g_show_vram || (g_use_threshold_colors && vram_level > kLevelNone)) &&
+				gpu.vram_valid && gpu.vram_used_gb >= 0.05f;
+
+			const int temp_level = (gpu.temp_valid) ?
+				temperature_level(static_cast<float>(gpu.temp)) : kLevelNone;
+			const bool show_power = (g_show_power && gpu.power_valid);
+			const bool show_temp = (g_show_temp || (g_use_threshold_colors && temp_level > kLevelNone)) && gpu.temp_valid;
 
 			char label[12];
 			if (snapshot.gpu_count > 1)
@@ -970,38 +1011,41 @@ static void draw_gpu_lines(const StatsSnapshot &snapshot)
 			else
 				snprintf(label, sizeof(label), "gpu");
 
-			if (gpu.usage_valid)
+			// GPU usage is always shown in the base color, regardless of load
+			if (show_usage)
 			{
 				char value[16];
 				snprintf(value, sizeof(value), "%.0f%%", gpu.usage);
-				draw_usage_metric(value, label, gpu.usage);
+				draw_metric_line(base_color(), value, label);
 			}
 
-			if (g_show_vram && gpu.vram_valid && gpu.vram_used_gb >= 0.05f)
+			if (show_vram)
 			{
 				char value[16];
-				snprintf(value, sizeof(value), "%.2f", gpu.vram_used_gb);
-				draw_metric_line(base_color(), value, "vram");
+				snprintf(value, sizeof(value), "%.1f", gpu.vram_used_gb);
+				draw_metric_line(level_color(vram_level), value, "vram");
 			}
 
-			if (g_show_power && gpu.power_valid)
+			if (show_power)
 			{
 				char value[16];
 				snprintf(value, sizeof(value), "%.0f", gpu.power);
-				draw_metric_line(base_color(), value, "w");
+				draw_metric_line(base_color(), value, "pow");
 			}
 
-			if (g_show_temp && gpu.temp_valid)
+			if (show_temp)
 			{
 				char value[16];
 				snprintf(value, sizeof(value), "%d", gpu.temp);
-				draw_metric_line(base_color(), value, "c");
+				draw_metric_line(level_color(temp_level), value, "temp");
 			}
 
-			if (!gpu.usage_valid && !(g_show_power && gpu.power_valid) &&
-				!(g_show_temp && gpu.temp_valid) && !(g_show_vram && gpu.vram_valid && gpu.vram_used_gb >= 0.05f))
+			if (!show_usage && !show_vram && !show_power && !show_temp)
 			{
-				draw_metric_placeholder(label);
+				// Only show a placeholder while the usage line is requested
+				// but no data for this GPU is available at all.
+				if (g_show_gpu_usage)
+					draw_metric_placeholder(label);
 			}
 		}
 	}
@@ -1010,51 +1054,77 @@ static void draw_gpu_lines(const StatsSnapshot &snapshot)
 		// PDH fallback path: usage and VRAM usage only
 		bool drew_any = false;
 
-		if (snapshot.gpu_fallback_valid)
+		if (g_show_gpu_usage && snapshot.gpu_fallback_valid)
 		{
 			char value[16];
 			snprintf(value, sizeof(value), "%.0f%%", snapshot.gpu_fallback_usage);
-			draw_usage_metric(value, "gpu", snapshot.gpu_fallback_usage);
+			draw_metric_line(base_color(), value, "gpu");
 			drew_any = true;
 		}
 
 		if (g_show_vram && snapshot.gpu_fallback_vram_valid)
 		{
 			char value[16];
-			snprintf(value, sizeof(value), "%.2f", snapshot.gpu_fallback_vram_usage);
+			snprintf(value, sizeof(value), "%.1f", snapshot.gpu_fallback_vram_usage);
 			draw_metric_line(base_color(), value, "vram");
 			drew_any = true;
 		}
 
-		if (!drew_any)
+		if (!drew_any && g_show_gpu_usage)
 			draw_metric_placeholder("gpu");
 	}
 }
 
 static void draw_osd(reshade::api::effect_runtime *)
 {
+	AcquireSRWLockShared(&g_snapshot_lock);
+	StatsSnapshot snapshot = g_snapshot;
+	ReleaseSRWLockShared(&g_snapshot_lock);
+
+	const FpsStats stats = fps_stats_snapshot();
+	const float scale = g_smooth_motion ? 2.0f : 1.0f;
+
+	// Warning-colored lines auto-show even when they are hidden by settings
+	bool any_warning = false;
+	if (g_use_threshold_colors)
+	{
+		const float fps_values[3] = { stats.fps * scale, stats.low1 * scale, stats.low01 * scale };
+		if (stats.valid)
+			for (const float value : fps_values)
+				any_warning |= (fps_level(value) > kLevelNone);
+
+		any_warning |= (snapshot.cpu_temp_valid && temperature_level(snapshot.cpu_temp) > kLevelNone);
+		any_warning |= (snapshot.ram_usage_valid && mem_available_level(snapshot.ram_free_gb) > kLevelNone);
+		for (int i = 0; i < snapshot.gpu_count && i < kMaxGpus; ++i)
+		{
+			const GpuSample &gpu = snapshot.gpus[i];
+			any_warning |= (gpu.temp_valid && temperature_level(static_cast<float>(gpu.temp)) > kLevelNone);
+			any_warning |= (gpu.vram_valid && gpu.vram_total_gb > 0.0f &&
+				mem_available_level(gpu.vram_total_gb - gpu.vram_used_gb) > kLevelNone);
+		}
+	}
+
 	if (!g_show_cpu_usage && !g_show_gpu_usage && !g_show_cpu_temp && !g_show_temp &&
-		!g_show_power && !g_show_vram && !g_show_ram && !g_show_cpu_freq && !g_show_fps)
+		!g_show_power && !g_show_vram && !g_show_ram && !g_show_fps && !g_show_battery && !any_warning)
 		return;
 
 	// Scales the OSD text. PushFont(nullptr, FontSizeBase * scale) is the
 	// Dear ImGui 1.92 replacement for the legacy ImGui::SetWindowFontScale.
 	ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * g_hud_scale);
+	// No window padding, so the HUD sits flush with the overlay's top-left edge
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
 
 	// Moves the HUD to its configured on-screen position, relative to the
 	// content area of the overlay window.
-	ImGui::SetCursorPos(ImVec2(g_hud_pos[0], g_hud_pos[1]));
+	ImGui::SetCursorPos(ImVec2(g_hud_pos_x, g_hud_pos_y));
 
-	AcquireSRWLockShared(&g_snapshot_lock);
-	StatsSnapshot snapshot = g_snapshot;
-	ReleaseSRWLockShared(&g_snapshot_lock);
-
-	if (g_show_fps)
+	if (g_show_fps || (g_use_threshold_colors && any_warning))
 		draw_fps_lines(nullptr);
 
 	draw_cpu_lines(snapshot);
 	draw_gpu_lines(snapshot);
 
+	ImGui::PopStyleVar();
 	ImGui::PopFont();
 }
 
@@ -1071,7 +1141,6 @@ static void save_config(reshade::api::effect_runtime *runtime)
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowPower", g_show_power);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowVram", g_show_vram);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowRam", g_show_ram);
-	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCpuFrequency", g_show_cpu_freq);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowFps", g_show_fps);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudScale", g_hud_scale);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
@@ -1092,13 +1161,18 @@ static void load_config()
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowPower", g_show_power);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowVram", g_show_vram);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowRam", g_show_ram);
-	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowCpuFrequency", g_show_cpu_freq);
+	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowBattery", g_show_battery);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowFps", g_show_fps);
+	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "SmoothMotion", g_smooth_motion);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
 
 	if (reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "HudScale", g_hud_scale) &&
 		(g_hud_scale < 0.25f || g_hud_scale > 4.0f))
-		g_hud_scale = 2.0f;
+		g_hud_scale = 1.0f;
+
+	if (reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "HudPosY", g_hud_pos_y) &&
+		(g_hud_pos_y < -10000.0f || g_hud_pos_y > 10000.0f))
+		g_hud_pos_y = 0.0f;
 
 	char color_string[64];
 	size_t color_length = sizeof(color_string) - 1;
@@ -1142,16 +1216,30 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowVram", g_show_vram);
 	if (ImGui::Checkbox("Show RAM usage", &g_show_ram))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowRam", g_show_ram);
-	if (ImGui::Checkbox("Show CPU clock (min-max across cores)", &g_show_cpu_freq))
-		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCpuFrequency", g_show_cpu_freq);
+	if (ImGui::Checkbox("Show battery level", &g_show_battery))
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowBattery", g_show_battery);
+
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowBattery", g_show_battery);
+
 	if (ImGui::Checkbox("Show FPS and 1%%/0.1%% low", &g_show_fps))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowFps", g_show_fps);
+	if (ImGui::Checkbox("Smooth Motion (double FPS stats)", &g_smooth_motion))
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "SmoothMotion", g_smooth_motion);
+
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "SmoothMotion", g_smooth_motion);
+
 
 	ImGui::SeparatorText("Appearance");
-	if (ImGui::SliderFloat("HUD scale##perfhud", &g_hud_scale, 0.5f, 3.0f, "%.2fx"))
-		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudScale", g_hud_scale);
+	if (ImGui::SliderFloat("HUD scale##perfhud", &g_hud_scale, 0.5f, 3.0f, "%.0fx"))
+	{
+		// Snap to whole-number multiples (1x steps)
+		g_hud_scale = std::round(g_hud_scale);
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudScale", g_hud_scale);
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudPosY", g_hud_pos_y);
+	}
 	if (ImGui::Checkbox("Color lines by load", &g_use_threshold_colors))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
+	ImGui::TextDisabled("Enabling this option will display yellow parameters.");
 	if (ImGui::ColorEdit4("Base text color", g_hud_color))
 	{
 		char color_string[64];
@@ -1160,11 +1248,25 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudColor", static_cast<const char *>(color_string));
 	}
 
-	if (ImGui::SliderInt("Refresh interval (ms)", &g_interval_config, 100, 10000))
+	if (ImGui::InputInt("Refresh interval (ms)", &g_interval_config, 100))
 	{
+		// Snap to 100 ms steps and clamp to the supported range
+		g_interval_config = std::clamp(g_interval_config, 100, 10000);
+		g_interval_config = (g_interval_config / 100) * 100;
 		g_interval_ms = static_cast<uint32_t>(g_interval_config);
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "RefreshIntervalMs", g_interval_config);
 	}
+
+	ImGui::Spacing();
+	if (ImGui::SliderFloat("HUD y offset##perfhud", &g_hud_pos_y, -2000.0f, 2000.0f, "%.0f px"))
+	{
+		// Snap to whole pixels
+		g_hud_pos_y = std::round(g_hud_pos_y);
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudPosY", g_hud_pos_y);
+	}
+
+	ImGui::Spacing();
+	ImGui::TextDisabled("Note: to change the HUD position, go to Settings > Overlay > \"OSD position on screen\".");
 
 	ImGui::Spacing();
 	ImGui::SeparatorText("Data sources");
@@ -1217,7 +1319,7 @@ static void on_present(reshade::api::effect_runtime *)
 
 extern "C" __declspec(dllexport) const char *NAME = "Performance HUD";
 extern "C" __declspec(dllexport) const char *AUTHOR = "reshade-better-color-and-texture";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Shows CPU/GPU usage, power draw, temperatures, CPU turbo boost clock, VRAM/RAM usage and FPS with 1%/0.1% low stats (10 second window) in a single column on the always-visible ReShade on-screen display.";
+extern "C" __declspec(dllexport) const char *DESCRIPTION = "Shows CPU/GPU usage, power draw, temperatures, VRAM/RAM usage and FPS with 1%/0.1% low stats (10 second window) in a single column on the always-visible ReShade on-screen display.";
 extern "C" __declspec(dllexport) const char *WEBSITE = "https://github.com/kless/reshade-better-color-and-texture";
 
 static void init()
