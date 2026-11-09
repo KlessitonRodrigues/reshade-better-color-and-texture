@@ -818,9 +818,22 @@ static const ImVec4 line_color(float percent)
 }
 
 // Single-column layout: every line is "value label", e.g. "60% cpu".
+// The value is drawn at the configured HUD scale while the label stays at the
+// base 1x font size, baseline-aligned with the value.
 static void draw_metric_line(const ImVec4 &color, const char *value, const char *label)
 {
-	ImGui::TextColored(color, "%s %s", value, label);
+	ImGui::TextColored(color, "%s", value);
+
+	// Baseline alignment: shift the smaller text down by the ascent difference
+	// between the two font sizes, so both share the same text baseline.
+	const float value_ascent = ImGui::GetFontBaked()->Ascent;
+
+	ImGui::SameLine();
+	ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase);
+	const float label_ascent = ImGui::GetFontBaked()->Ascent;
+	ImGui::SetCursorPosY(ImGui::GetCursorPosY() + value_ascent - label_ascent);
+	ImGui::TextColored(color, "%s", label);
+	ImGui::PopFont();
 }
 
 static void draw_metric_placeholder(const char *label)
