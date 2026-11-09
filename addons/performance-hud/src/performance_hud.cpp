@@ -997,13 +997,13 @@ static void draw_gpu_lines(const StatsSnapshot &snapshot)
 				gpu.vram_total_gb - gpu.vram_used_gb : 0.0f;
 			const int vram_level = (gpu.vram_valid && gpu.vram_total_gb > 0.0f) ?
 				mem_available_level(vram_free_gb) : kLevelNone;
-			const bool show_vram = (g_show_vram || vram_level > kLevelNone) &&
+			const bool show_vram = (g_show_vram || (g_use_threshold_colors && vram_level > kLevelNone)) &&
 				gpu.vram_valid && gpu.vram_used_gb >= 0.05f;
 
 			const int temp_level = (gpu.temp_valid) ?
 				temperature_level(static_cast<float>(gpu.temp)) : kLevelNone;
 			const bool show_power = (g_show_power && gpu.power_valid);
-			const bool show_temp = (g_show_temp || temp_level > kLevelNone) && gpu.temp_valid;
+			const bool show_temp = (g_show_temp || (g_use_threshold_colors && temp_level > kLevelNone)) && gpu.temp_valid;
 
 			char label[12];
 			if (snapshot.gpu_count > 1)
@@ -1239,6 +1239,7 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 	}
 	if (ImGui::Checkbox("Color lines by load", &g_use_threshold_colors))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
+	ImGui::TextDisabled("Enabling this option will display yellow parameters.");
 	if (ImGui::ColorEdit4("Base text color", g_hud_color))
 	{
 		char color_string[64];
