@@ -89,7 +89,8 @@ struct StatsSnapshot
 	bool  cpu_temp_valid;
 	float cpu_temp;           // degrees celsius
 	bool  cpu_freq_valid;
-	float cpu_freq_ghz;       // current clock of core 0
+	float cpu_freq_min_ghz;   // lowest current clock across all cores
+	float cpu_freq_max_ghz;   // highest current clock across all cores
 	bool  ram_usage_valid;
 	float ram_used_gb;        // physical memory in use
 	bool  gpu_fallback_valid; // PDH GPU Engine counters are in use
@@ -367,10 +368,9 @@ static bool sample_cpu_temp(float *out_celsius)
 	return true;
 }
 
-// Reports the current clock rate of logical processor 0 (core 0), using
-// CallNtPowerInformation's per-processor power information. Core 0 reflects
-// the turbo boost clock when it enters a boost state.
-static bool sample_cpu_frequency(float *out_ghz)
+// Reports the lowest and highest current clock rate across all logical
+// processors, using CallNtPowerInformation's per-processor power information.
+static bool sample_cpu_frequency(float *out_min_ghz, float *out_max_ghz)
 {
 	struct ProcessorPowerInfo
 	{
@@ -384,18 +384,34 @@ static bool sample_cpu_frequency(float *out_ghz)
 	static_assert(sizeof(ProcessorPowerInfo) == 24, "unexpected struct layout");
 
 	// The API fills one entry per logical processor, so the buffer must cover
-	// all of them; only the first entry (core 0) is used.
+	// all of them.
 	constexpr size_t kMaxEntries = 1024;
 	BYTE buffer[kMaxEntries * sizeof(ProcessorPowerInfo)];
 	if (CallNtPowerInformation(ProcessorInformation, nullptr, 0, buffer, sizeof(buffer)) != ERROR_SUCCESS)
 		return false;
 
-	ProcessorPowerInfo entry;
-	memcpy(&entry, buffer, sizeof(entry)); // entries are returned in processor order
-	if (entry.current_mhz == 0)
+	DWORD processor_count = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+	if (processor_count == 0 || processor_count > kMaxEntries)
+		processor_count = static_cast<DWORD>(kMaxEntries);
+
+	ULONG min_mhz = 0;
+	ULONG max_mhz = 0;
+	for (DWORD i = 0; i < processor_count; ++i)
+	{
+		ProcessorPowerInfo entry;
+		memcpy(&entry, buffer + i * sizeof(ProcessorPowerInfo), sizeof(entry));
+		if (entry.current_mhz == 0)
+			continue;
+		if (min_mhz == 0 || entry.current_mhz < min_mhz)
+			min_mhz = entry.current_mhz;
+		if (entry.current_mhz > max_mhz)
+			max_mhz = entry.current_mhz;
+	}
+	if (max_mhz == 0)
 		return false;
 
-	*out_ghz = static_cast<float>(entry.current_mhz) / 1000.0f;
+	*out_min_ghz = static_cast<float>(min_mhz) / 1000.0f;
+	*out_max_ghz = static_cast<float>(max_mhz) / 1000.0f;
 	return true;
 }
 
@@ -596,7 +612,7 @@ static void update_snapshot()
 	next.cpu_power_valid = sample_cpu_power(&next.cpu_power);
 	next.cpu_power_valid = (next.cpu_power_valid && next.cpu_power >= 0.0f);
 	next.cpu_temp_valid = sample_cpu_temp(&next.cpu_temp);
-	next.cpu_freq_valid = sample_cpu_frequency(&next.cpu_freq_ghz);
+	next.cpu_freq_valid = sample_cpu_frequency(&next.cpu_freq_min_ghz, &next.cpu_freq_max_ghz);
 	next.ram_usage_valid = sample_ram_usage(&next.ram_used_gb);
 
 	if (g_nvml_device_count > 0)
@@ -884,7 +900,7 @@ static void draw_cpu_lines(const StatsSnapshot &snapshot)
 		if (snapshot.cpu_freq_valid)
 		{
 			char value[16];
-			snprintf(value, sizeof(value), "%.2f", snapshot.cpu_freq_ghz);
+			snprintf(value, sizeof(value), "%.2f-%.2f", snapshot.cpu_freq_min_ghz, snapshot.cpu_freq_max_ghz);
 			draw_metric_line(base_color(), value, "ghz");
 		}
 		else if (!snapshot.cpu_usage_valid)
@@ -1126,7 +1142,7 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowVram", g_show_vram);
 	if (ImGui::Checkbox("Show RAM usage", &g_show_ram))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowRam", g_show_ram);
-	if (ImGui::Checkbox("Show CPU turbo boost (max core clock)", &g_show_cpu_freq))
+	if (ImGui::Checkbox("Show CPU clock (min-max across cores)", &g_show_cpu_freq))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCpuFrequency", g_show_cpu_freq);
 	if (ImGui::Checkbox("Show FPS and 1%%/0.1%% low", &g_show_fps))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowFps", g_show_fps);
