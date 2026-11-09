@@ -112,10 +112,17 @@ static bool g_show_ram = true;
 static bool    g_show_fps = true;
 static bool    g_smooth_motion = false;       // double FPS stats (e.g. NVIDIA Smooth Motion)
 static bool    g_show_battery = true;
-static float g_hud_pos_x = 0.0f;          // horizontal offset of the HUD from the left edge, in pixels
-static float g_hud_pos_y = 0.0f;          // vertical offset of the HUD from the top edge, in pixels
+static constexpr float kHudMarginX = 8.0f; // distance from the left/right screen edge, in pixels
+static constexpr float kHudMarginY = 0.0f; // distance from the top/bottom screen edge, in pixels
+enum HudAnchor { kAnchorTopLeft, kAnchorTopRight, kAnchorBottomLeft, kAnchorBottomRight };
+static int g_hud_anchor = kAnchorTopLeft;
+// Text block bounds: origin and size measured this frame, and the size from
+// the previous frame, which is used to place right/bottom anchored blocks.
+static ImVec2 g_hud_origin;
+static ImVec2 g_hud_measured_size;
+static ImVec2 g_hud_block_size;
 static float g_hud_scale = 2.0f;          // font scale of the OSD text
-static float g_hud_color[4] = { 1.0f, 1.0f, 1.0f, 0.8f }; // #FFFFFFCC
+static float g_hud_color[4] = { 1.0f, 1.0f, 1.0f, 0.667f }; // #FFFFFFAA
 static bool g_use_threshold_colors = true; // color usage lines by load level
 static std::atomic<uint32_t> g_interval_ms { 1000 };
 
@@ -820,6 +827,9 @@ static const ImVec4 line_color(float percent)
 static void draw_metric_line(const ImVec4 &color, const char *value, const char *label)
 {
 	ImGui::TextColored(color, "%s %s", value, label);
+	const ImVec2 item_max = ImGui::GetItemRectMax();
+	g_hud_measured_size.x = std::max(g_hud_measured_size.x, item_max.x - g_hud_origin.x);
+	g_hud_measured_size.y = std::max(g_hud_measured_size.y, item_max.y - g_hud_origin.y);
 }
 
 static void draw_metric_placeholder(const char *label)
@@ -1005,7 +1015,14 @@ static void draw_osd(reshade::api::effect_runtime *)
 
 	// Moves the HUD to its configured on-screen position, relative to the
 	// content area of the overlay window.
-	ImGui::SetCursorPos(ImVec2(g_hud_pos_x, g_hud_pos_y));
+	const ImVec2 window_size = ImGui::GetWindowSize();
+	const bool right = (g_hud_anchor == kAnchorTopRight || g_hud_anchor == kAnchorBottomRight);
+	const bool bottom = (g_hud_anchor == kAnchorBottomLeft || g_hud_anchor == kAnchorBottomRight);
+	const float x = right ? window_size.x - g_hud_block_size.x - kHudMarginX : kHudMarginX;
+	const float y = bottom ? window_size.y - g_hud_block_size.y - kHudMarginY : kHudMarginY;
+	ImGui::SetCursorPos(ImVec2(x, y));
+	g_hud_origin = ImGui::GetCursorScreenPos();
+	g_hud_measured_size = ImVec2(0.0f, 0.0f);
 
 	AcquireSRWLockShared(&g_snapshot_lock);
 	StatsSnapshot snapshot = g_snapshot;
@@ -1016,6 +1033,8 @@ static void draw_osd(reshade::api::effect_runtime *)
 
 	draw_cpu_lines(snapshot);
 	draw_gpu_lines(snapshot);
+
+	g_hud_block_size = g_hud_measured_size;
 
 	ImGui::PopStyleVar();
 	ImGui::PopFont();
@@ -1036,8 +1055,7 @@ static void save_config(reshade::api::effect_runtime *runtime)
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowRam", g_show_ram);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowFps", g_show_fps);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudScale", g_hud_scale);
-	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudPosX", g_hud_pos_x);
-	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudPosY", g_hud_pos_y);
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudAnchor", g_hud_anchor);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "RefreshIntervalMs", static_cast<int>(g_interval_ms.load()));
 
@@ -1061,8 +1079,9 @@ static void load_config()
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "SmoothMotion", g_smooth_motion);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
 
-	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "HudPosX", g_hud_pos_x);
-	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "HudPosY", g_hud_pos_y);
+	if (reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "HudAnchor", g_hud_anchor) &&
+		(g_hud_anchor < kAnchorTopLeft || g_hud_anchor > kAnchorBottomRight))
+		g_hud_anchor = kAnchorTopLeft;
 	if (reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "HudScale", g_hud_scale) &&
 		(g_hud_scale < 0.25f || g_hud_scale > 4.0f))
 		g_hud_scale = 2.0f;
@@ -1125,10 +1144,8 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 	ImGui::SeparatorText("Appearance");
 	if (ImGui::SliderFloat("HUD scale##perfhud", &g_hud_scale, 0.5f, 3.0f, "%.2fx"))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudScale", g_hud_scale);
-	if (ImGui::SliderFloat("X offset (px)##perfhud", &g_hud_pos_x, 0.0f, 1000.0f, "%.0f"))
-		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudPosX", g_hud_pos_x);
-	if (ImGui::SliderFloat("Y offset (px)##perfhud", &g_hud_pos_y, 0.0f, 1000.0f, "%.0f"))
-		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudPosY", g_hud_pos_y);
+	if (ImGui::Combo("Screen position##perfhud", &g_hud_anchor, "Top left\0Top right\0Bottom left\0Bottom right\0"))
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudAnchor", g_hud_anchor);
 	if (ImGui::Checkbox("Color lines by load", &g_use_threshold_colors))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
 	if (ImGui::ColorEdit4("Base text color", g_hud_color))
