@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -921,8 +922,10 @@ static void draw_gpu_lines(const StatsSnapshot &snapshot)
 		for (int i = 0; i < snapshot.gpu_count && i < kMaxGpus; ++i)
 		{
 			const GpuSample &gpu = snapshot.gpus[i];
-			if (!gpu.usage_valid && !g_show_vram && !g_show_power && !g_show_temp)
-				continue;
+			const bool show_usage = (g_show_gpu_usage && gpu.usage_valid);
+			const bool show_vram = (g_show_vram && gpu.vram_valid && gpu.vram_used_gb >= 0.05f);
+			const bool show_power = (g_show_power && gpu.power_valid);
+			const bool show_temp = (g_show_temp && gpu.temp_valid);
 
 			char label[12];
 			if (snapshot.gpu_count > 1)
@@ -930,38 +933,40 @@ static void draw_gpu_lines(const StatsSnapshot &snapshot)
 			else
 				snprintf(label, sizeof(label), "gpu");
 
-			if (gpu.usage_valid)
+			if (show_usage)
 			{
 				char value[16];
 				snprintf(value, sizeof(value), "%.0f%%", gpu.usage);
 				draw_usage_metric(value, label, gpu.usage);
 			}
 
-			if (g_show_vram && gpu.vram_valid && gpu.vram_used_gb >= 0.05f)
+			if (show_vram)
 			{
 				char value[16];
 				snprintf(value, sizeof(value), "%.1f", gpu.vram_used_gb);
 				draw_metric_line(base_color(), value, "vram");
 			}
 
-			if (g_show_power && gpu.power_valid)
+			if (show_power)
 			{
 				char value[16];
 				snprintf(value, sizeof(value), "%.0f", gpu.power);
 				draw_metric_line(base_color(), value, "pow");
 			}
 
-			if (g_show_temp && gpu.temp_valid)
+			if (show_temp)
 			{
 				char value[16];
 				snprintf(value, sizeof(value), "%d", gpu.temp);
 				draw_metric_line(base_color(), value, "temp");
 			}
 
-			if (!gpu.usage_valid && !(g_show_power && gpu.power_valid) &&
-				!(g_show_temp && gpu.temp_valid) && !(g_show_vram && gpu.vram_valid && gpu.vram_used_gb >= 0.05f))
+			if (!show_usage && !show_vram && !show_power && !show_temp)
 			{
-				draw_metric_placeholder(label);
+				// Only show a placeholder while the usage line is requested
+				// but no data for this GPU is available at all.
+				if (g_show_gpu_usage)
+					draw_metric_placeholder(label);
 			}
 		}
 	}
@@ -970,7 +975,7 @@ static void draw_gpu_lines(const StatsSnapshot &snapshot)
 		// PDH fallback path: usage and VRAM usage only
 		bool drew_any = false;
 
-		if (snapshot.gpu_fallback_valid)
+		if (g_show_gpu_usage && snapshot.gpu_fallback_valid)
 		{
 			char value[16];
 			snprintf(value, sizeof(value), "%.0f%%", snapshot.gpu_fallback_usage);
@@ -986,7 +991,7 @@ static void draw_gpu_lines(const StatsSnapshot &snapshot)
 			drew_any = true;
 		}
 
-		if (!drew_any)
+		if (!drew_any && g_show_gpu_usage)
 			draw_metric_placeholder("gpu");
 	}
 }
@@ -1119,8 +1124,12 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 
 
 	ImGui::SeparatorText("Appearance");
-	if (ImGui::SliderFloat("HUD scale##perfhud", &g_hud_scale, 0.5f, 3.0f, "%.2fx"))
+	if (ImGui::SliderFloat("HUD scale##perfhud", &g_hud_scale, 0.5f, 3.0f, "%.0fx"))
+	{
+		// Snap to whole-number multiples (1x steps)
+		g_hud_scale = std::round(g_hud_scale);
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudScale", g_hud_scale);
+	}
 	if (ImGui::Checkbox("Color lines by load", &g_use_threshold_colors))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
 	if (ImGui::ColorEdit4("Base text color", g_hud_color))
@@ -1133,9 +1142,14 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 
 	if (ImGui::SliderInt("Refresh interval (ms)", &g_interval_config, 100, 10000))
 	{
+		// Snap to 100 ms steps
+		g_interval_config = (g_interval_config / 100) * 100;
 		g_interval_ms = static_cast<uint32_t>(g_interval_config);
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "RefreshIntervalMs", g_interval_config);
 	}
+
+	ImGui::Spacing();
+	ImGui::TextDisabled("Note: to change the HUD position, go to Settings > Overlay > \"OSD position on screen\".");
 
 	ImGui::Spacing();
 	ImGui::SeparatorText("Data sources");

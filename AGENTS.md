@@ -3,7 +3,7 @@
 Guidance for agents working in this repository.
 File convention: <parent_folder>.<file_name>.ts
 Keep agents.md and readme.md up to date on change project structure
-Commit small changes using "feat/update/fix/refactor/remove:<short_description>"
+Commit small changes using "feat/update/fix/refactor/remove: <short_description>"
 Push commits is always manual
 
 ## Project Overview
@@ -23,14 +23,15 @@ reshade-better-color-and-texture/
 │   └── workflows/
 │       └── release.yml             # CI: zip repo and publish GitHub Release on push to main
 ├── addons/
-│   └── performance-hud/            # "Performance HUD" ReShade add-on (CPU/GPU usage + power OSD)
-│       ├── build.sh                # Cross-build script (llvm-mingw), produced PerformanceHUD.addon64
+│   └── performance-hud/            # "Performance HUD" ReShade add-on data source (CPU/GPU usage + power OSD)
+│       ├── build.sh                # Cross-build script (llvm-mingw), outputs PerformanceHUD.addon64
 │       ├── CMakeLists.txt          # CMake project (MSVC or mingw) for the same add-on
-│       ├── PerformanceHUD.addon64  # Prebuilt add-on binary, loaded via [ADDON] AddonPath
 │       ├── include/                # Vendored ReShade add-on API headers + matching imgui.h (1.92.5)
 │       └── src/
 │           └── performance_hud.cpp # Add-on implementation (NVML/PDH sampling, OSD overlay)
 └── reshade-shaders/
+    ├── Addons/                     # Built add-on binaries, loaded via [ADDON] AddonPath
+    │   └── PerformanceHUD.addon64  # Prebuilt Performance HUD add-on binary
     ├── Shaders/                    # HLSL effects (.fx) and shared headers (.fxh)
     │   ├── ambient_v2.fx           # Ambient removal + contrast curve (DH_Ambient_Remove_V2)
     │   ├── Colourfulness_v3.fx     # Colourfulness + Vibrance variant (ColourfulnessV3)
@@ -69,7 +70,7 @@ reshade-better-color-and-texture/
 ## Build / Test / Release
 
 - The HLSL preset has **no build system or test suite**: validation is manual (load the preset in ReShade and verify effects render without compile errors).
-- The Performance HUD add-on (`addons/performance-hud/`) builds via `build.sh` (llvm-mingw cross-build, also works on Linux; if no llvm-mingw is installed it auto-downloads a pinned toolchain to `~/.cache` on first run) or `CMakeLists.txt` (MSVC on Windows). A prebuilt `PerformanceHUD.addon64` is committed and loaded via `[ADDON] AddonPath` in `ReShade.ini`; rebuild it after editing `src/performance_hud.cpp` and make sure the vendored headers in `include/` (reshade + imgui 1.92.5) stay in sync with the installed ReShade version.
+- The Performance HUD add-on (`addons/performance-hud/`) builds via `build.sh` (llvm-mingw cross-build, also works on Linux; if no llvm-mingw is installed it auto-downloads a pinned toolchain to `~/.cache` on first run) or `CMakeLists.txt` (MSVC on Windows). Both output `PerformanceHUD.addon64` to `reshade-shaders/Addons/`, which is where the prebuilt binary is committed and `[ADDON] AddonPath` in `ReShade.ini` loads it from; rebuild it after editing `src/performance_hud.cpp` and make sure the vendored headers in `include/` (reshade + imgui 1.92.5) stay in sync with the installed ReShade version.
 - Release: pushing to `main` triggers `.github/workflows/release.yml`, which tags `v${GITHUB_RUN_NUMBER}`, zips the repo (excluding `.git/*` and `.github/*`), and publishes a GitHub Release.
 
 ## Notes for Agents

@@ -26,7 +26,7 @@ This preset improves color, shadows, texture detail, and sharpness in supported 
 
 ## Performance HUD
 
-The preset includes a ReShade add-on (`addons/performance-hud/PerformanceHUD.addon64`) that displays an always-visible on-screen HUD with:
+The preset includes a ReShade add-on (`reshade-shaders/Addons/PerformanceHUD.addon64`) that displays an always-visible on-screen HUD with:
 
 - CPU usage (and CPU package power in watts when the system provides it)
 - GPU usage per adapter, with power draw and temperature on NVIDIA GPUs (via NVML)
@@ -36,8 +36,9 @@ Configure it under **Add-ons > Performance HUD** in the ReShade overlay (toggle 
 
 Notes:
 
-- Requires a full ReShade installation (with add-on support) that includes the `AddonPath` handling; `ReShade.ini` in this repository already sets `[ADDON] AddonPath=.\addons\performance-hud`.
-- Copy `addons/performance-hud/PerformanceHUD.addon64` together with the other preset files next to the game executable for the HUD to load.
+- Requires a full ReShade installation (with add-on support) that includes the `AddonPath` handling; `ReShade.ini` in this repository already sets `[ADDON] AddonPath=.\reshade-shaders\Addons`.
+- Copy `reshade-shaders/Addons/PerformanceHUD.addon64` together with the other preset files next to the game executable for the HUD to load.
+- To change the HUD position, go to the ReShade settings: **Settings > Overlay > "OSD position on screen"**.
 
 
 ## Videos

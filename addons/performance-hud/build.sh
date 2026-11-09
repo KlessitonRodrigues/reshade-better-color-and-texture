@@ -28,11 +28,15 @@ fi
 
 MINGW_PREFIX="${MINGW_PREFIX:-x86_64-w64-mingw32}"
 
+# Output to the root reshade-shaders/Addons directory, where ReShade loads add-ons from.
+OUT_DIR="$(pwd)/../../reshade-shaders/Addons"
+mkdir -p "$OUT_DIR"
+
 "$MINGW_PREFIX-clang++" -O2 -std=c++20 -shared \
-	-o PerformanceHUD.addon64 src/performance_hud.cpp \
+	-o "$OUT_DIR/PerformanceHUD.addon64" src/performance_hud.cpp \
 	-Iinclude \
 	-static \
 	-lpdh \
 	-Wl,--nxcompat,--dynamicbase,--high-entropy-va
 
-echo "Built $(pwd)/PerformanceHUD.addon64"
+echo "Built $(cd "$OUT_DIR" && pwd)/PerformanceHUD.addon64"

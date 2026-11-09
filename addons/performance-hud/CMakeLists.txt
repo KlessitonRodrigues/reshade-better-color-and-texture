@@ -14,7 +14,16 @@ else()
 	target_link_options(performance_hud PRIVATE -static)
 endif()
 
+# Output to the root reshade-shaders/Addons directory, where ReShade loads add-ons from.
+set(ADDON_OUTPUT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../reshade-shaders/Addons")
+
 set_target_properties(performance_hud PROPERTIES
 	OUTPUT_NAME "PerformanceHUD"
 	PREFIX ""
-	SUFFIX ".addon64")
+	SUFFIX ".addon64"
+	RUNTIME_OUTPUT_DIRECTORY "${ADDON_OUTPUT_DIR}")
+
+foreach(config DEBUG RELEASE MINSIZEREL RELWITHDEBINFO)
+	set_target_properties(performance_hud PROPERTIES
+		RUNTIME_OUTPUT_DIRECTORY_${config} "${ADDON_OUTPUT_DIR}")
+endforeach()
