@@ -946,7 +946,9 @@ static void draw_cpu_lines(const StatsSnapshot &snapshot)
 		}
 	}
 
-	if (g_show_battery && snapshot.battery_valid)
+	const bool show_battery_line = g_show_battery || (g_use_threshold_colors && snapshot.battery_valid &&
+		battery_level(snapshot.battery_percent) > kLevelNone);
+	if (show_battery_line && snapshot.battery_valid)
 	{
 		char value[16];
 		snprintf(value, sizeof(value), "%d%%", snapshot.battery_percent);
