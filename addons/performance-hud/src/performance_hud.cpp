@@ -117,7 +117,7 @@ static bool    g_show_battery = true;
 static constexpr float g_hud_pos_x = 8.0f;   // distance from the left screen edge, in pixels
 static float g_hud_pos_y = 0.0f;          // vertical offset from the top screen edge, in pixels (positive or negative)
 static float g_hud_scale = 1.0f;          // font scale of the OSD text (ReShade's global font size provides the base resolution)
-static float g_hud_color[4] = { 1.0f, 1.0f, 1.0f, 0.667f }; // #FFFFFFAA
+static float g_hud_color[4] = { 1.0f, 1.0f, 1.0f, 1.0f }; // #FFFFFFFF
 static bool g_use_threshold_colors = true; // color usage lines by load level
 static std::atomic<uint32_t> g_interval_ms { 1000 };
 
@@ -845,6 +845,16 @@ static int mem_available_level(float free_gb)
 	return kLevelNone;
 }
 
+// Battery line: below 80% yellow, below 50% red
+static int battery_level(int percent)
+{
+	if (percent < 50)
+		return kLevelCritical;
+	if (percent < 80)
+		return kLevelWarning;
+	return kLevelNone;
+}
+
 // Temperature lines: above 70 C yellow, above 80 C red
 static int temperature_level(float celsius)
 {
@@ -940,7 +950,7 @@ static void draw_cpu_lines(const StatsSnapshot &snapshot)
 	{
 		char value[16];
 		snprintf(value, sizeof(value), "%d%%", snapshot.battery_percent);
-		draw_metric_line(base_color(), value, "bat");
+		draw_metric_line(level_color(battery_level(snapshot.battery_percent)), value, "bat");
 	}
 }
 
@@ -954,8 +964,6 @@ static FpsStats fps_stats_snapshot()
 
 static void draw_fps_lines(reshade::api::effect_runtime *)
 {
-	update_fps_stats();
-
 	const FpsStats stats = fps_stats_snapshot();
 
 	if (!stats.valid)
@@ -1081,6 +1089,9 @@ static void draw_osd(reshade::api::effect_runtime *)
 	StatsSnapshot snapshot = g_snapshot;
 	ReleaseSRWLockShared(&g_snapshot_lock);
 
+	// Stats must be refreshed here, not only when the FPS lines are drawn:
+	// otherwise a hidden FPS line never gets evaluated and never auto-shows.
+	update_fps_stats();
 	const FpsStats stats = fps_stats_snapshot();
 	const float scale = g_smooth_motion ? 2.0f : 1.0f;
 
@@ -1095,6 +1106,7 @@ static void draw_osd(reshade::api::effect_runtime *)
 
 		any_warning |= (snapshot.cpu_temp_valid && temperature_level(snapshot.cpu_temp) > kLevelNone);
 		any_warning |= (snapshot.ram_usage_valid && mem_available_level(snapshot.ram_free_gb) > kLevelNone);
+		any_warning |= (snapshot.battery_valid && battery_level(snapshot.battery_percent) > kLevelNone);
 		for (int i = 0; i < snapshot.gpu_count && i < kMaxGpus; ++i)
 		{
 			const GpuSample &gpu = snapshot.gpus[i];
@@ -1202,6 +1214,8 @@ static void load_config()
 static void draw_settings(reshade::api::effect_runtime *runtime)
 {
 	ImGui::SeparatorText("Metrics");
+	if (ImGui::Checkbox("Show performance issues only", &g_use_threshold_colors))
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
 	if (ImGui::Checkbox("Show CPU usage", &g_show_cpu_usage))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCPU", g_show_cpu_usage);
 	if (ImGui::Checkbox("Show GPU usage", &g_show_gpu_usage))
@@ -1237,9 +1251,6 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudScale", g_hud_scale);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudPosY", g_hud_pos_y);
 	}
-	if (ImGui::Checkbox("Color lines by load", &g_use_threshold_colors))
-		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
-	ImGui::TextDisabled("Enabling this option will display yellow parameters.");
 	if (ImGui::ColorEdit4("Base text color", g_hud_color))
 	{
 		char color_string[64];
