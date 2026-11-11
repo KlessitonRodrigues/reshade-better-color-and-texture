@@ -855,6 +855,16 @@ static int battery_level(int percent)
 	return kLevelNone;
 }
 
+// CPU/GPU usage lines: 60+ % yellow, 90+ % red (matches color_for_percent)
+static int usage_level(float percent)
+{
+	if (percent >= 90.0f)
+		return kLevelCritical;
+	if (percent >= 60.0f)
+		return kLevelWarning;
+	return kLevelNone;
+}
+
 // Temperature lines: above 70 C yellow, above 80 C red
 static int temperature_level(float celsius)
 {
@@ -898,7 +908,11 @@ static void draw_usage_metric(const char *value, const char *label, float percen
 
 static void draw_cpu_lines(const StatsSnapshot &snapshot)
 {
-	if (g_show_cpu_usage)
+	// With "Show performance issues only", the usage line auto-shows when the
+	// CPU load reaches a warning level, even if "Show CPU usage" is off.
+	const bool cpu_usage_warning = (g_use_threshold_colors && snapshot.cpu_usage_valid &&
+		usage_level(snapshot.cpu_usage) > kLevelNone);
+	if (g_show_cpu_usage || cpu_usage_warning)
 	{
 		if (snapshot.cpu_usage_valid)
 		{
@@ -906,7 +920,7 @@ static void draw_cpu_lines(const StatsSnapshot &snapshot)
 			snprintf(value, sizeof(value), "%.0f%%", snapshot.cpu_usage);
 			draw_usage_metric(value, "cpu", snapshot.cpu_usage);
 		}
-		else
+		else if (g_show_cpu_usage)
 		{
 			draw_metric_placeholder("cpu");
 		}
@@ -1106,6 +1120,7 @@ static void draw_osd(reshade::api::effect_runtime *)
 			for (const float value : fps_values)
 				any_warning |= (fps_level(value) > kLevelNone);
 
+		any_warning |= (snapshot.cpu_usage_valid && usage_level(snapshot.cpu_usage) > kLevelNone);
 		any_warning |= (snapshot.cpu_temp_valid && temperature_level(snapshot.cpu_temp) > kLevelNone);
 		any_warning |= (snapshot.ram_usage_valid && mem_available_level(snapshot.ram_free_gb) > kLevelNone);
 		any_warning |= (snapshot.battery_valid && battery_level(snapshot.battery_percent) > kLevelNone);
