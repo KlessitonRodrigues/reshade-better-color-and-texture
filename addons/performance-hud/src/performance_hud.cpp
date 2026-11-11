@@ -9,8 +9,10 @@
  *  - CPU usage:      GetSystemTimes (kernel/user time deltas)
  *  - CPU power:      PDH counter \Processor Information(_Total)\Package Power
  *                    (only shown when the system provides the counter)
- *  - CPU temp:       PDH counter \Processor Information(_Total)\Temperature
- *                    Data (Kelvin or tenths-of-Kelvin, converted to Celsius)
+ *  - CPU temp:       PDH counter \Thermal Zone Information(*)\Temperature
+ *                    (ACPI thermal zones, hottest valid zone is shown; Kelvin
+ *                    or tenths-of-Kelvin, converted to Celsius). Zones are
+ *                    motherboard-dependent and may not be the CPU die itself.
  *  - RAM usage:      GlobalMemoryStatusEx (physical memory in use)
  *  - GPU usage:      NVML (NVIDIA) with PDH \GPU Engine(*)\Utilization
  *                    Percentage fallback (what Task Manager uses, Windows 10+)
@@ -301,10 +303,11 @@ static void load_pdh()
 	g_pdh_cpu_power_available =
 		(PdhAddEnglishCounterW(g_pdh_query, L"\\Processor Information(_Total)\\Package Power", 0, &g_pdh_cpu_power_counter) == ERROR_SUCCESS);
 
-	// CPU temperature. Reports Kelvin (sometimes tenths of Kelvin) depending
-	// on the platform; sample_cpu_temp normalizes it to Celsius.
+	// CPU-side temperature from ACPI thermal zones. Reports Kelvin (sometimes
+	// tenths of Kelvin) depending on the platform; sample_cpu_temp normalizes
+	// it to Celsius.
 	g_pdh_cpu_temp_available =
-		(PdhAddEnglishCounterW(g_pdh_query, L"\\Processor Information(_Total)\\Temperature Data", 0, &g_pdh_cpu_temp_counter) == ERROR_SUCCESS);
+		(PdhAddEnglishCounterW(g_pdh_query, L"\\Thermal Zone Information(*)\\Temperature", 0, &g_pdh_cpu_temp_counter) == ERROR_SUCCESS);
 
 	// GPU engine utilization, used as fallback while NVML is not available
 	g_pdh_gpu_available =
@@ -339,21 +342,14 @@ static bool sample_cpu_power(float *out_watts)
 	return true;
 }
 
-// Normalizes the \Temperature Data counter value to Celsius. Depending on
+// Normalizes a \Thermal Zone Information temperature to Celsius. Depending on
 // the platform it is reported in Kelvin, tenths of Kelvin, or already in
-// Celsius. Plausible CPU temperatures never overlap between those scales for
-// the processed range, so a simple bucketing heuristic is safe.
-static bool sample_cpu_temp(float *out_celsius)
+// Celsius. Plausible temperatures never overlap between those scales for the
+// processed range, so a simple bucketing heuristic is safe.
+// Returns false when the value is outside the plausible range.
+static bool normalize_thermal_celsius(double raw, double *out_celsius)
 {
-	if (!g_pdh_cpu_temp_available)
-		return false;
-
-	PDH_FMT_COUNTERVALUE value;
-	if (PdhGetFormattedCounterValue(g_pdh_cpu_temp_counter, PDH_FMT_DOUBLE, nullptr, &value) != ERROR_SUCCESS ||
-		value.CStatus != PDH_CSTATUS_VALID_DATA)
-		return false;
-
-	double celsius = value.doubleValue;
+	double celsius = raw;
 	if (celsius >= 2000.0 && celsius < 5000.0)       // tenths of Kelvin
 		celsius = celsius * 0.1 - 273.15;
 	else if (celsius > 200.0 && celsius < 500.0)     // Kelvin
@@ -363,7 +359,56 @@ static bool sample_cpu_temp(float *out_celsius)
 	if (celsius < -10.0 || celsius > 120.0)
 		return false;
 
-	*out_celsius = static_cast<float>(celsius);
+	*out_celsius = celsius;
+	return true;
+}
+
+// Reports the hottest valid ACPI thermal zone, in Celsius.
+static bool sample_cpu_temp(float *out_celsius)
+{
+	if (!g_pdh_cpu_temp_available)
+		return false;
+
+	// First call with a null buffer determines the required buffer size
+	DWORD buffer_size = 0;
+	DWORD item_count = 0;
+	PDH_STATUS status = PdhGetFormattedCounterArrayW(g_pdh_cpu_temp_counter, PDH_FMT_DOUBLE, &buffer_size, &item_count, nullptr);
+	if (status != PDH_MORE_DATA || buffer_size == 0)
+		return false;
+
+	if (buffer_size > g_pdh_items_size)
+	{
+		void *const new_items = HeapReAlloc(GetProcessHeap(), 0, g_pdh_items, buffer_size);
+		if (new_items == nullptr)
+			return false;
+		g_pdh_items = static_cast<PDH_FMT_COUNTERVALUE_ITEM_W *>(new_items);
+		g_pdh_items_size = buffer_size;
+	}
+
+	status = PdhGetFormattedCounterArrayW(g_pdh_cpu_temp_counter, PDH_FMT_DOUBLE, &buffer_size, &item_count, g_pdh_items);
+	if (status != ERROR_SUCCESS)
+		return false;
+
+	bool any_valid = false;
+	double hottest = 0.0;
+	for (DWORD i = 0; i < item_count; ++i)
+	{
+		if (g_pdh_items[i].FmtValue.CStatus != PDH_CSTATUS_VALID_DATA)
+			continue;
+
+		double celsius = 0.0;
+		if (!normalize_thermal_celsius(g_pdh_items[i].FmtValue.doubleValue, &celsius))
+			continue;
+
+		if (!any_valid || celsius > hottest)
+			hottest = celsius;
+		any_valid = true;
+	}
+
+	if (!any_valid)
+		return false;
+
+	*out_celsius = static_cast<float>(hottest);
 	return true;
 }
 
