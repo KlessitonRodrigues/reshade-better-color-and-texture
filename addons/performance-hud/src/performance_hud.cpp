@@ -405,6 +405,17 @@ static bool sample_cpu_temp(float *out_celsius)
 		any_valid = true;
 	}
 
+	// Log the raw data once so unusual scales or empty zone lists can be diagnosed
+	static bool logged = false;
+	if (!logged)
+	{
+		logged = true;
+		log_info("Performance HUD: thermal zone instances=%lu, usable=%d.", static_cast<unsigned long>(item_count), any_valid ? 1 : 0);
+		for (DWORD i = 0; i < item_count && i < 4; ++i)
+			log_info("Performance HUD: thermal zone raw value=%.2f status=%ld.",
+				g_pdh_items[i].FmtValue.doubleValue, static_cast<long>(g_pdh_items[i].FmtValue.CStatus));
+	}
+
 	if (!any_valid)
 		return false;
 
@@ -944,6 +955,13 @@ static void draw_metric_placeholder(const char *label)
 	draw_metric_line(disabled_color, "...", label);
 }
 
+// Shown in place of a metric whose source is missing or returned no data
+static void draw_metric_unavailable(const char *label)
+{
+	static const ImVec4 disabled_color = { 0.55f, 0.55f, 0.55f, 1.0f };
+	draw_metric_line(disabled_color, "n/a", label);
+}
+
 // Usage line carries the threshold coloring; other metrics are separate lines
 // below it in the same column.
 static void draw_usage_metric(const char *value, const char *label, float percent)
@@ -971,11 +989,18 @@ static void draw_cpu_lines(const StatsSnapshot &snapshot)
 		}
 	}
 
-	if (g_show_power && snapshot.cpu_power_valid)
+	if (g_show_power)
 	{
-		char value[16];
-		snprintf(value, sizeof(value), "%.0f", snapshot.cpu_power);
-		draw_metric_line(base_color(), value, "w");
+		if (snapshot.cpu_power_valid)
+		{
+			char value[16];
+			snprintf(value, sizeof(value), "%.0f", snapshot.cpu_power);
+			draw_metric_line(base_color(), value, "w");
+		}
+		else
+		{
+			draw_metric_unavailable("w");
+		}
 	}
 
 	if (g_show_cpu_temp || (g_use_threshold_colors && snapshot.cpu_temp_valid &&
@@ -986,6 +1011,10 @@ static void draw_cpu_lines(const StatsSnapshot &snapshot)
 			char value[16];
 			snprintf(value, sizeof(value), "%d", static_cast<int>(snapshot.cpu_temp + 0.5f));
 			draw_metric_line(level_color(temperature_level(snapshot.cpu_temp)), value, "c");
+		}
+		else if (g_show_cpu_temp)
+		{
+			draw_metric_unavailable("c");
 		}
 	}
 
@@ -1348,15 +1377,22 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 	else
 		ImGui::TextDisabled("NVML: no NVIDIA GPU found.");
 
-	if (g_pdh_cpu_power_available)
-		ImGui::TextDisabled("CPU package power counter is available.");
-	else
-		ImGui::TextDisabled("CPU package power counter is unavailable on this system.");
+	// Report live data, not just whether the counter was registered
+	StatsSnapshot snapshot;
+	AcquireSRWLockShared(&g_snapshot_lock);
+	snapshot = g_snapshot;
+	ReleaseSRWLockShared(&g_snapshot_lock);
 
-	if (g_pdh_cpu_temp_available)
-		ImGui::TextDisabled("CPU temperature counter is available.");
+	if (snapshot.cpu_power_valid)
+		ImGui::TextDisabled("CPU package power: reading data.");
 	else
-		ImGui::TextDisabled("CPU temperature counter is unavailable on this system.");
+		ImGui::TextDisabled("CPU package power: not available%s.", g_pdh_cpu_power_available ? " (counter present, no data)" : "");
+
+	if (snapshot.cpu_temp_valid)
+		ImGui::TextDisabled("CPU temperature: reading data.");
+	else
+		ImGui::TextDisabled("CPU temperature: not available%s.", g_pdh_cpu_temp_available ? " (counter present, no data)" : "");
+
 
 	ImGui::TextDisabled("GPU power and temperature require NVIDIA NVML (other GPUs report usage only).");
 }
