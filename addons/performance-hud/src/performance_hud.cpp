@@ -36,6 +36,7 @@
 #include <cstring>
 
 static constexpr int kMaxGpus = 16;
+static constexpr uint32_t kMaxCores = 256;
 
 static void log_info(const char *fmt, ...)
 {
@@ -78,8 +79,8 @@ struct StatsSnapshot
 	bool  cpu_usage_valid;
 	float cpu_usage;          // percent 0-100
 	bool  core_usage_valid;
-	float core_usage;         // busiest logical core, percent 0-100
-	int   core_index;         // index of the busiest logical core
+	int   core_count;
+	float core_usage[kMaxCores]; // every logical core, percent 0-100
 	bool  ram_usage_valid;
 	float ram_used_gb;        // physical memory in use
 	float ram_free_gb;        // physical memory still available
@@ -108,7 +109,7 @@ static bool g_show_ram = true;
 static bool    g_show_fps = true;
 static bool    g_smooth_motion = false;       // double FPS stats (e.g. NVIDIA Smooth Motion)
 static bool g_show_battery = true;
-static bool g_show_core = false;           // most used logical core, colored by load
+static bool g_show_core = false;           // usage of every logical core, colored by load
 
 static constexpr float g_hud_pos_x = 8.0f;   // distance from the left screen edge, in pixels
 static float g_hud_pos_y = 0.0f;          // vertical offset from the top screen edge, in pixels (positive or negative)
@@ -509,7 +510,6 @@ namespace ntdll
 	static constexpr ULONG kSystemProcessorPerformanceInformation = 8;
 }
 
-static constexpr uint32_t kMaxCores = 256;
 static uint64_t g_prev_core_idle[kMaxCores] = { 0 };
 static uint64_t g_prev_core_total[kMaxCores] = { 0 };
 static bool g_prev_core_valid = false;
@@ -522,10 +522,10 @@ static void load_ntdll()
 			GetProcAddress(module, "NtQuerySystemInformation")));
 }
 
-static bool sample_most_used_core(float *out_usage, int *out_core)
+// Fills out_usage[0..*out_count) with the usage of every logical core.
+static bool sample_core_usage(float *out_usage, int *out_count)
 {
-	*out_usage = 0.0f;
-	*out_core = 0;
+	*out_count = 0;
 	if (ntdll::query == nullptr)
 		return false;
 
@@ -544,9 +544,7 @@ static bool sample_most_used_core(float *out_usage, int *out_core)
 	}
 
 	const uint32_t count = std::min<uint32_t>(returned / sizeof(info[0]), kMaxCores);
-	bool valid = g_prev_core_valid;
-	float max_usage = -1.0f;
-	int max_core = 0;
+	const bool valid = g_prev_core_valid;
 	for (uint32_t i = 0; i < count; ++i)
 	{
 		const uint64_t idle_now = static_cast<uint64_t>(info[i].IdleTime.QuadPart);
@@ -557,12 +555,11 @@ static bool sample_most_used_core(float *out_usage, int *out_core)
 		{
 			const double idle_delta = static_cast<double>(idle_now) - static_cast<double>(g_prev_core_idle[i]);
 			const double total_delta = static_cast<double>(total_now) - static_cast<double>(g_prev_core_total[i]);
-			const float usage = static_cast<float>(std::clamp(100.0 - 100.0 * idle_delta / total_delta, 0.0, 100.0));
-			if (usage > max_usage)
-			{
-				max_usage = usage;
-				max_core = static_cast<int>(i);
-			}
+			out_usage[i] = static_cast<float>(std::clamp(100.0 - 100.0 * idle_delta / total_delta, 0.0, 100.0));
+		}
+		else
+		{
+			out_usage[i] = 0.0f;
 		}
 
 		g_prev_core_idle[i] = idle_now;
@@ -570,12 +567,8 @@ static bool sample_most_used_core(float *out_usage, int *out_core)
 	}
 	g_prev_core_valid = true;
 
-	if (!valid || max_usage < 0.0f)
-		return false;
-
-	*out_usage = max_usage;
-	*out_core = max_core;
-	return true;
+	*out_count = static_cast<int>(count);
+	return valid;
 }
 
 // --------------------------------------------------------------- sampling
@@ -587,7 +580,15 @@ static void update_snapshot()
 
 	// CPU usage via time deltas
 	next.cpu_usage_valid = sample_cpu_usage(&next.cpu_usage);
-	next.core_usage_valid = sample_most_used_core(&next.core_usage, &next.core_index);
+	// Per-core usage is only sampled while "Show core usage" is enabled
+	if (g_show_core)
+	{
+		next.core_usage_valid = sample_core_usage(next.core_usage, &next.core_count);
+	}
+	else
+	{
+		g_prev_core_valid = false;
+	}
 
 	// Collect performance counter values once per interval, before reading them
 	const bool use_gpu_fallback = (g_nvml_device_count == 0 && g_pdh_gpu_available);
@@ -945,19 +946,19 @@ static void draw_cpu_lines(const StatsSnapshot &snapshot)
 		}
 	}
 
-	// Most used core: shown when enabled, or automatically when its load is at
-	// a warning level (yellow/red), colored by load
-	const bool core_warning = (g_use_threshold_colors && snapshot.core_usage_valid &&
-		usage_level(snapshot.core_usage) > kLevelNone);
-	if (g_show_core || core_warning)
+	// One line per logical core, colored by load. Only when enabled.
+	if (g_show_core)
 	{
 		if (snapshot.core_usage_valid)
 		{
-			char value[16];
-			char label[16];
-			snprintf(value, sizeof(value), "%.0f%%", snapshot.core_usage);
-			snprintf(label, sizeof(label), "core%d", snapshot.core_index);
-			draw_usage_metric(value, label, snapshot.core_usage);
+			for (int i = 0; i < snapshot.core_count; ++i)
+			{
+				char value[16];
+				char label[16];
+				snprintf(value, sizeof(value), "%.0f%%", snapshot.core_usage[i]);
+				snprintf(label, sizeof(label), "core%d", i);
+				draw_usage_metric(value, label, snapshot.core_usage[i]);
+			}
 		}
 		else
 		{
@@ -1142,7 +1143,6 @@ static void draw_osd(reshade::api::effect_runtime *)
 				any_warning |= (fps_level(value) > kLevelNone);
 
 		any_warning |= (snapshot.cpu_usage_valid && usage_level(snapshot.cpu_usage) > kLevelNone);
-		any_warning |= (snapshot.core_usage_valid && usage_level(snapshot.core_usage) > kLevelNone);
 		any_warning |= (snapshot.ram_usage_valid && mem_available_level(snapshot.ram_free_gb) > kLevelNone);
 		any_warning |= (snapshot.battery_valid && battery_level(snapshot.battery_percent) > kLevelNone);
 		for (int i = 0; i < snapshot.gpu_count && i < kMaxGpus; ++i)
@@ -1256,7 +1256,7 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
 	if (ImGui::Checkbox("Show CPU usage", &g_show_cpu_usage))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCPU", g_show_cpu_usage);
-	if (ImGui::Checkbox("Show most used core", &g_show_core))
+	if (ImGui::Checkbox("Show core usage", &g_show_core))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCore", g_show_core);
 	if (ImGui::Checkbox("Show GPU usage", &g_show_gpu_usage))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowGPU", g_show_gpu_usage);
