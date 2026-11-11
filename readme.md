@@ -29,7 +29,7 @@ This preset improves color, shadows, texture detail, and sharpness in supported 
 The preset includes a ReShade add-on (`reshade-shaders/Addons/PerformanceHUD.addon64`) that displays an always-visible on-screen HUD in a single column, one metric per line:
 
 - **FPS**: average FPS plus 1% and 0.1% lows over a rolling 10 second window (Smooth Motion option doubles the values for frame generation)
-- **CPU**: usage, package power in watts (when the system provides it), temperature in C
+- **CPU**: usage
 - **RAM**: used memory in GB
 - **GPU**: usage per adapter, VRAM used in GB, and power draw and temperature on NVIDIA GPUs (via NVML). Non-NVIDIA GPUs report usage and VRAM using Windows GPU counters (what Task Manager uses)
 - **Battery**: charge percentage on laptops
@@ -46,7 +46,7 @@ Warning thresholds:
 | CPU / GPU usage | 60% and above | 90% and above |
 | FPS | below 60 | below 30 |
 | RAM / VRAM free | below 1 GB | below 0.5 GB |
-| CPU / GPU temperature | above 70 C | above 80 C |
+| GPU temperature | above 70 C | above 80 C |
 | Battery | below 80% | below 50% |
 
 Notes:

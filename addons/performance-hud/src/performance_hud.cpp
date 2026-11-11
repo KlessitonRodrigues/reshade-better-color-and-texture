@@ -7,12 +7,6 @@
  *
  * Data sources:
  *  - CPU usage:      GetSystemTimes (kernel/user time deltas)
- *  - CPU power:      PDH counter \Processor Information(_Total)\Package Power
- *                    (only shown when the system provides the counter)
- *  - CPU temp:       PDH counter \Thermal Zone Information(*)\Temperature
- *                    (ACPI thermal zones, hottest valid zone is shown; Kelvin
- *                    or tenths-of-Kelvin, converted to Celsius). Zones are
- *                    motherboard-dependent and may not be the CPU die itself.
  *  - RAM usage:      GlobalMemoryStatusEx (physical memory in use)
  *  - GPU usage:      NVML (NVIDIA) with PDH \GPU Engine(*)\Utilization
  *                    Percentage fallback (what Task Manager uses, Windows 10+)
@@ -83,10 +77,6 @@ struct StatsSnapshot
 {
 	bool  cpu_usage_valid;
 	float cpu_usage;          // percent 0-100
-	bool  cpu_power_valid;
-	float cpu_power;          // watts
-	bool  cpu_temp_valid;
-	float cpu_temp;           // degrees celsius
 	bool  ram_usage_valid;
 	float ram_used_gb;        // physical memory in use
 	float ram_free_gb;        // physical memory still available
@@ -108,7 +98,6 @@ static SRWLOCK g_snapshot_lock = SRWLOCK_INIT;
 
 static bool g_show_cpu_usage = true;
 static bool g_show_gpu_usage = true;
-static bool g_show_cpu_temp = true;
 static bool g_show_temp = true;
 static bool g_show_power = true;
 static bool g_show_vram = true;
@@ -255,10 +244,6 @@ static void load_nvml()
 // --------------------------------------------------------------- PDH
 
 static PDH_HQUERY g_pdh_query = nullptr;
-static PDH_HCOUNTER g_pdh_cpu_power_counter = nullptr;
-static bool g_pdh_cpu_power_available = false;
-static PDH_HCOUNTER g_pdh_cpu_temp_counter = nullptr;
-static bool g_pdh_cpu_temp_available = false;
 static PDH_HCOUNTER g_pdh_gpu_counter = nullptr;
 static bool g_pdh_gpu_available = false;
 static PDH_HCOUNTER g_pdh_gpu_mem_counter = nullptr;
@@ -275,12 +260,8 @@ static void release_pdh()
 		PdhCloseQuery(g_pdh_query);
 		g_pdh_query = nullptr;
 	}
-	g_pdh_cpu_power_counter = nullptr;
-	g_pdh_cpu_temp_counter = nullptr;
 	g_pdh_gpu_counter = nullptr;
 	g_pdh_gpu_mem_counter = nullptr;
-	g_pdh_cpu_power_available = false;
-	g_pdh_cpu_temp_available = false;
 	g_pdh_gpu_available = false;
 	g_pdh_gpu_mem_available = false;
 	if (g_pdh_items != nullptr)
@@ -299,16 +280,6 @@ static void load_pdh()
 		return;
 	}
 
-	// CPU package power in watts, if the system provides this counter
-	g_pdh_cpu_power_available =
-		(PdhAddEnglishCounterW(g_pdh_query, L"\\Processor Information(_Total)\\Package Power", 0, &g_pdh_cpu_power_counter) == ERROR_SUCCESS);
-
-	// CPU-side temperature from ACPI thermal zones. Reports Kelvin (sometimes
-	// tenths of Kelvin) depending on the platform; sample_cpu_temp normalizes
-	// it to Celsius.
-	g_pdh_cpu_temp_available =
-		(PdhAddEnglishCounterW(g_pdh_query, L"\\Thermal Zone Information(*)\\Temperature", 0, &g_pdh_cpu_temp_counter) == ERROR_SUCCESS);
-
 	// GPU engine utilization, used as fallback while NVML is not available
 	g_pdh_gpu_available =
 		(PdhAddEnglishCounterW(g_pdh_query, L"\\GPU Engine(*)\\Utilization Percentage", 0, &g_pdh_gpu_counter) == ERROR_SUCCESS);
@@ -318,109 +289,10 @@ static void load_pdh()
 	g_pdh_gpu_mem_available =
 		(PdhAddEnglishCounterW(g_pdh_query, L"\\GPU Adapter Memory(*)\\Dedicated Usage", 0, &g_pdh_gpu_mem_counter) == ERROR_SUCCESS);
 
-	if (g_pdh_cpu_power_available)
-		log_info("Performance HUD: CPU package power counter is available.");
-	if (g_pdh_cpu_temp_available)
-		log_info("Performance HUD: CPU temperature counter is available.");
 	if (g_pdh_gpu_available)
 		log_info("Performance HUD: GPU engine counters are available.");
 	if (g_pdh_gpu_mem_available)
 		log_info("Performance HUD: GPU adapter memory counters are available.");
-}
-
-static bool sample_cpu_power(float *out_watts)
-{
-	if (!g_pdh_cpu_power_available)
-		return false;
-
-	PDH_FMT_COUNTERVALUE value;
-	if (PdhGetFormattedCounterValue(g_pdh_cpu_power_counter, PDH_FMT_DOUBLE, nullptr, &value) != ERROR_SUCCESS ||
-		value.CStatus != PDH_CSTATUS_VALID_DATA)
-		return false;
-
-	*out_watts = static_cast<float>(value.doubleValue);
-	return true;
-}
-
-// Normalizes a \Thermal Zone Information temperature to Celsius. Depending on
-// the platform it is reported in Kelvin, tenths of Kelvin, or already in
-// Celsius. Plausible temperatures never overlap between those scales for the
-// processed range, so a simple bucketing heuristic is safe.
-// Returns false when the value is outside the plausible range.
-static bool normalize_thermal_celsius(double raw, double *out_celsius)
-{
-	double celsius = raw;
-	if (celsius >= 2000.0 && celsius < 5000.0)       // tenths of Kelvin
-		celsius = celsius * 0.1 - 273.15;
-	else if (celsius > 200.0 && celsius < 500.0)     // Kelvin
-		celsius -= 273.15;
-	// else: assume already Celsius
-
-	if (celsius < -10.0 || celsius > 120.0)
-		return false;
-
-	*out_celsius = celsius;
-	return true;
-}
-
-// Reports the hottest valid ACPI thermal zone, in Celsius.
-static bool sample_cpu_temp(float *out_celsius)
-{
-	if (!g_pdh_cpu_temp_available)
-		return false;
-
-	// First call with a null buffer determines the required buffer size
-	DWORD buffer_size = 0;
-	DWORD item_count = 0;
-	PDH_STATUS status = PdhGetFormattedCounterArrayW(g_pdh_cpu_temp_counter, PDH_FMT_DOUBLE, &buffer_size, &item_count, nullptr);
-	if (status != PDH_MORE_DATA || buffer_size == 0)
-		return false;
-
-	if (buffer_size > g_pdh_items_size)
-	{
-		void *const new_items = HeapReAlloc(GetProcessHeap(), 0, g_pdh_items, buffer_size);
-		if (new_items == nullptr)
-			return false;
-		g_pdh_items = static_cast<PDH_FMT_COUNTERVALUE_ITEM_W *>(new_items);
-		g_pdh_items_size = buffer_size;
-	}
-
-	status = PdhGetFormattedCounterArrayW(g_pdh_cpu_temp_counter, PDH_FMT_DOUBLE, &buffer_size, &item_count, g_pdh_items);
-	if (status != ERROR_SUCCESS)
-		return false;
-
-	bool any_valid = false;
-	double hottest = 0.0;
-	for (DWORD i = 0; i < item_count; ++i)
-	{
-		if (g_pdh_items[i].FmtValue.CStatus != PDH_CSTATUS_VALID_DATA)
-			continue;
-
-		double celsius = 0.0;
-		if (!normalize_thermal_celsius(g_pdh_items[i].FmtValue.doubleValue, &celsius))
-			continue;
-
-		if (!any_valid || celsius > hottest)
-			hottest = celsius;
-		any_valid = true;
-	}
-
-	// Log the raw data once so unusual scales or empty zone lists can be diagnosed
-	static bool logged = false;
-	if (!logged)
-	{
-		logged = true;
-		log_info("Performance HUD: thermal zone instances=%lu, usable=%d.", static_cast<unsigned long>(item_count), any_valid ? 1 : 0);
-		for (DWORD i = 0; i < item_count && i < 4; ++i)
-			log_info("Performance HUD: thermal zone raw value=%.2f status=%ld.",
-				g_pdh_items[i].FmtValue.doubleValue, static_cast<long>(g_pdh_items[i].FmtValue.CStatus));
-	}
-
-	if (!any_valid)
-		return false;
-
-	*out_celsius = static_cast<float>(hottest);
-	return true;
 }
 
 // Reports the battery charge level. BatteryLifePercent is 255 when unknown
@@ -627,12 +499,9 @@ static void update_snapshot()
 	// Collect performance counter values once per interval, before reading them
 	const bool use_gpu_fallback = (g_nvml_device_count == 0 && g_pdh_gpu_available);
 	const bool use_gpu_memory_fallback = (g_nvml_device_count == 0 && g_pdh_gpu_mem_available);
-	if (g_pdh_cpu_power_available || g_pdh_cpu_temp_available || use_gpu_fallback || use_gpu_memory_fallback)
+	if (use_gpu_fallback || use_gpu_memory_fallback)
 		PdhCollectQueryData(g_pdh_query);
 
-	next.cpu_power_valid = sample_cpu_power(&next.cpu_power);
-	next.cpu_power_valid = (next.cpu_power_valid && next.cpu_power >= 0.0f);
-	next.cpu_temp_valid = sample_cpu_temp(&next.cpu_temp);
 	next.ram_usage_valid = sample_ram_usage(&next.ram_used_gb, &next.ram_free_gb);
 	next.battery_valid = sample_battery(&next.battery_percent);
 
@@ -955,12 +824,6 @@ static void draw_metric_placeholder(const char *label)
 	draw_metric_line(disabled_color, "...", label);
 }
 
-// Shown in place of a metric whose source is missing or returned no data
-static void draw_metric_unavailable(const char *label)
-{
-	static const ImVec4 disabled_color = { 0.55f, 0.55f, 0.55f, 1.0f };
-	draw_metric_line(disabled_color, "n/a", label);
-}
 
 // Usage line carries the threshold coloring; other metrics are separate lines
 // below it in the same column.
@@ -986,35 +849,6 @@ static void draw_cpu_lines(const StatsSnapshot &snapshot)
 		else if (g_show_cpu_usage)
 		{
 			draw_metric_placeholder("cpu");
-		}
-	}
-
-	if (g_show_power)
-	{
-		if (snapshot.cpu_power_valid)
-		{
-			char value[16];
-			snprintf(value, sizeof(value), "%.0f", snapshot.cpu_power);
-			draw_metric_line(base_color(), value, "w");
-		}
-		else
-		{
-			draw_metric_unavailable("w");
-		}
-	}
-
-	if (g_show_cpu_temp || (g_use_threshold_colors && snapshot.cpu_temp_valid &&
-		temperature_level(snapshot.cpu_temp) > kLevelNone))
-	{
-		if (snapshot.cpu_temp_valid)
-		{
-			char value[16];
-			snprintf(value, sizeof(value), "%d", static_cast<int>(snapshot.cpu_temp + 0.5f));
-			draw_metric_line(level_color(temperature_level(snapshot.cpu_temp)), value, "c");
-		}
-		else if (g_show_cpu_temp)
-		{
-			draw_metric_unavailable("c");
 		}
 	}
 
@@ -1195,7 +1029,6 @@ static void draw_osd(reshade::api::effect_runtime *)
 				any_warning |= (fps_level(value) > kLevelNone);
 
 		any_warning |= (snapshot.cpu_usage_valid && usage_level(snapshot.cpu_usage) > kLevelNone);
-		any_warning |= (snapshot.cpu_temp_valid && temperature_level(snapshot.cpu_temp) > kLevelNone);
 		any_warning |= (snapshot.ram_usage_valid && mem_available_level(snapshot.ram_free_gb) > kLevelNone);
 		any_warning |= (snapshot.battery_valid && battery_level(snapshot.battery_percent) > kLevelNone);
 		for (int i = 0; i < snapshot.gpu_count && i < kMaxGpus; ++i)
@@ -1207,7 +1040,7 @@ static void draw_osd(reshade::api::effect_runtime *)
 		}
 	}
 
-	if (!g_show_cpu_usage && !g_show_gpu_usage && !g_show_cpu_temp && !g_show_temp &&
+	if (!g_show_cpu_usage && !g_show_gpu_usage && !g_show_temp &&
 		!g_show_power && !g_show_vram && !g_show_ram && !g_show_fps && !g_show_battery && !any_warning)
 		return;
 
@@ -1239,7 +1072,6 @@ static void save_config(reshade::api::effect_runtime *runtime)
 {
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCPU", g_show_cpu_usage);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowGPU", g_show_gpu_usage);
-	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCPUTemp", g_show_cpu_temp);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowGPUTemp", g_show_temp);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowPower", g_show_power);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowVram", g_show_vram);
@@ -1259,7 +1091,6 @@ static void load_config()
 {
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowCPU", g_show_cpu_usage);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowGPU", g_show_gpu_usage);
-	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowCPUTemp", g_show_cpu_temp);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowGPUTemp", g_show_temp);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowPower", g_show_power);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowVram", g_show_vram);
@@ -1311,8 +1142,6 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCPU", g_show_cpu_usage);
 	if (ImGui::Checkbox("Show GPU usage", &g_show_gpu_usage))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowGPU", g_show_gpu_usage);
-	if (ImGui::Checkbox("Show CPU temperature", &g_show_cpu_temp))
-		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCPUTemp", g_show_cpu_temp);
 	if (ImGui::Checkbox("Show GPU temperature", &g_show_temp))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowGPUTemp", g_show_temp);
 	if (ImGui::Checkbox("Show power draw", &g_show_power))
@@ -1383,15 +1212,6 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 	snapshot = g_snapshot;
 	ReleaseSRWLockShared(&g_snapshot_lock);
 
-	if (snapshot.cpu_power_valid)
-		ImGui::TextDisabled("CPU package power: reading data.");
-	else
-		ImGui::TextDisabled("CPU package power: not available%s.", g_pdh_cpu_power_available ? " (counter present, no data)" : "");
-
-	if (snapshot.cpu_temp_valid)
-		ImGui::TextDisabled("CPU temperature: reading data.");
-	else
-		ImGui::TextDisabled("CPU temperature: not available%s.", g_pdh_cpu_temp_available ? " (counter present, no data)" : "");
 
 
 	ImGui::TextDisabled("GPU power and temperature require NVIDIA NVML (other GPUs report usage only).");
