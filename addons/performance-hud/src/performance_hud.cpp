@@ -7,10 +7,6 @@
  *
  * Data sources:
  *  - CPU usage:      GetSystemTimes (kernel/user time deltas)
- *  - CPU power:      PDH counter \Processor Information(_Total)\Package Power
- *                    (only shown when the system provides the counter)
- *  - CPU temp:       PDH counter \Processor Information(_Total)\Temperature
- *                    Data (Kelvin or tenths-of-Kelvin, converted to Celsius)
  *  - RAM usage:      GlobalMemoryStatusEx (physical memory in use)
  *  - GPU usage:      NVML (NVIDIA) with PDH \GPU Engine(*)\Utilization
  *                    Percentage fallback (what Task Manager uses, Windows 10+)
@@ -40,6 +36,7 @@
 #include <cstring>
 
 static constexpr int kMaxGpus = 16;
+static constexpr uint32_t kMaxCores = 256;
 
 static void log_info(const char *fmt, ...)
 {
@@ -81,10 +78,9 @@ struct StatsSnapshot
 {
 	bool  cpu_usage_valid;
 	float cpu_usage;          // percent 0-100
-	bool  cpu_power_valid;
-	float cpu_power;          // watts
-	bool  cpu_temp_valid;
-	float cpu_temp;           // degrees celsius
+	bool  core_usage_valid;
+	int   core_count;
+	float core_usage[kMaxCores]; // every logical core, percent 0-100
 	bool  ram_usage_valid;
 	float ram_used_gb;        // physical memory in use
 	float ram_free_gb;        // physical memory still available
@@ -106,18 +102,19 @@ static SRWLOCK g_snapshot_lock = SRWLOCK_INIT;
 
 static bool g_show_cpu_usage = true;
 static bool g_show_gpu_usage = true;
-static bool g_show_cpu_temp = true;
 static bool g_show_temp = true;
 static bool g_show_power = true;
 static bool g_show_vram = true;
 static bool g_show_ram = true;
 static bool    g_show_fps = true;
 static bool    g_smooth_motion = false;       // double FPS stats (e.g. NVIDIA Smooth Motion)
-static bool    g_show_battery = true;
+static bool g_show_battery = true;
+static bool g_show_core = false;           // usage of every logical core, colored by load
+
 static constexpr float g_hud_pos_x = 8.0f;   // distance from the left screen edge, in pixels
 static float g_hud_pos_y = 0.0f;          // vertical offset from the top screen edge, in pixels (positive or negative)
 static float g_hud_scale = 1.0f;          // font scale of the OSD text (ReShade's global font size provides the base resolution)
-static float g_hud_color[4] = { 1.0f, 1.0f, 1.0f, 0.667f }; // #FFFFFFAA
+static float g_hud_color[4] = { 1.0f, 1.0f, 1.0f, 1.0f }; // #FFFFFFFF
 static bool g_use_threshold_colors = true; // color usage lines by load level
 static std::atomic<uint32_t> g_interval_ms { 1000 };
 
@@ -253,10 +250,6 @@ static void load_nvml()
 // --------------------------------------------------------------- PDH
 
 static PDH_HQUERY g_pdh_query = nullptr;
-static PDH_HCOUNTER g_pdh_cpu_power_counter = nullptr;
-static bool g_pdh_cpu_power_available = false;
-static PDH_HCOUNTER g_pdh_cpu_temp_counter = nullptr;
-static bool g_pdh_cpu_temp_available = false;
 static PDH_HCOUNTER g_pdh_gpu_counter = nullptr;
 static bool g_pdh_gpu_available = false;
 static PDH_HCOUNTER g_pdh_gpu_mem_counter = nullptr;
@@ -273,12 +266,8 @@ static void release_pdh()
 		PdhCloseQuery(g_pdh_query);
 		g_pdh_query = nullptr;
 	}
-	g_pdh_cpu_power_counter = nullptr;
-	g_pdh_cpu_temp_counter = nullptr;
 	g_pdh_gpu_counter = nullptr;
 	g_pdh_gpu_mem_counter = nullptr;
-	g_pdh_cpu_power_available = false;
-	g_pdh_cpu_temp_available = false;
 	g_pdh_gpu_available = false;
 	g_pdh_gpu_mem_available = false;
 	if (g_pdh_items != nullptr)
@@ -297,15 +286,6 @@ static void load_pdh()
 		return;
 	}
 
-	// CPU package power in watts, if the system provides this counter
-	g_pdh_cpu_power_available =
-		(PdhAddEnglishCounterW(g_pdh_query, L"\\Processor Information(_Total)\\Package Power", 0, &g_pdh_cpu_power_counter) == ERROR_SUCCESS);
-
-	// CPU temperature. Reports Kelvin (sometimes tenths of Kelvin) depending
-	// on the platform; sample_cpu_temp normalizes it to Celsius.
-	g_pdh_cpu_temp_available =
-		(PdhAddEnglishCounterW(g_pdh_query, L"\\Processor Information(_Total)\\Temperature Data", 0, &g_pdh_cpu_temp_counter) == ERROR_SUCCESS);
-
 	// GPU engine utilization, used as fallback while NVML is not available
 	g_pdh_gpu_available =
 		(PdhAddEnglishCounterW(g_pdh_query, L"\\GPU Engine(*)\\Utilization Percentage", 0, &g_pdh_gpu_counter) == ERROR_SUCCESS);
@@ -315,56 +295,10 @@ static void load_pdh()
 	g_pdh_gpu_mem_available =
 		(PdhAddEnglishCounterW(g_pdh_query, L"\\GPU Adapter Memory(*)\\Dedicated Usage", 0, &g_pdh_gpu_mem_counter) == ERROR_SUCCESS);
 
-	if (g_pdh_cpu_power_available)
-		log_info("Performance HUD: CPU package power counter is available.");
-	if (g_pdh_cpu_temp_available)
-		log_info("Performance HUD: CPU temperature counter is available.");
 	if (g_pdh_gpu_available)
 		log_info("Performance HUD: GPU engine counters are available.");
 	if (g_pdh_gpu_mem_available)
 		log_info("Performance HUD: GPU adapter memory counters are available.");
-}
-
-static bool sample_cpu_power(float *out_watts)
-{
-	if (!g_pdh_cpu_power_available)
-		return false;
-
-	PDH_FMT_COUNTERVALUE value;
-	if (PdhGetFormattedCounterValue(g_pdh_cpu_power_counter, PDH_FMT_DOUBLE, nullptr, &value) != ERROR_SUCCESS ||
-		value.CStatus != PDH_CSTATUS_VALID_DATA)
-		return false;
-
-	*out_watts = static_cast<float>(value.doubleValue);
-	return true;
-}
-
-// Normalizes the \Temperature Data counter value to Celsius. Depending on
-// the platform it is reported in Kelvin, tenths of Kelvin, or already in
-// Celsius. Plausible CPU temperatures never overlap between those scales for
-// the processed range, so a simple bucketing heuristic is safe.
-static bool sample_cpu_temp(float *out_celsius)
-{
-	if (!g_pdh_cpu_temp_available)
-		return false;
-
-	PDH_FMT_COUNTERVALUE value;
-	if (PdhGetFormattedCounterValue(g_pdh_cpu_temp_counter, PDH_FMT_DOUBLE, nullptr, &value) != ERROR_SUCCESS ||
-		value.CStatus != PDH_CSTATUS_VALID_DATA)
-		return false;
-
-	double celsius = value.doubleValue;
-	if (celsius >= 2000.0 && celsius < 5000.0)       // tenths of Kelvin
-		celsius = celsius * 0.1 - 273.15;
-	else if (celsius > 200.0 && celsius < 500.0)     // Kelvin
-		celsius -= 273.15;
-	// else: assume already Celsius
-
-	if (celsius < -10.0 || celsius > 120.0)
-		return false;
-
-	*out_celsius = static_cast<float>(celsius);
-	return true;
 }
 
 // Reports the battery charge level. BatteryLifePercent is 255 when unknown
@@ -558,6 +492,85 @@ static bool sample_cpu_usage(float *out_usage)
 	return valid;
 }
 
+// Per-logical-core usage via NtQuerySystemInformation(SystemProcessorPerformanceInformation).
+// Returns the busiest core. Kernel time includes idle time, as in GetSystemTimes.
+namespace ntdll
+{
+	struct ProcessorPerformanceInfo
+	{
+		LARGE_INTEGER IdleTime;
+		LARGE_INTEGER KernelTime;
+		LARGE_INTEGER UserTime;
+		LARGE_INTEGER DpcTime;
+		LARGE_INTEGER InterruptTime;
+		ULONG InterruptCount;
+	};
+	using Query_t = LONG (NTAPI *)(ULONG, PVOID, ULONG, PULONG);
+	static Query_t query = nullptr;
+	static constexpr ULONG kSystemProcessorPerformanceInformation = 8;
+}
+
+static uint64_t g_prev_core_idle[kMaxCores] = { 0 };
+static uint64_t g_prev_core_total[kMaxCores] = { 0 };
+static bool g_prev_core_valid = false;
+
+static void load_ntdll()
+{
+	HMODULE module = GetModuleHandleW(L"ntdll.dll");
+	if (module != nullptr)
+		ntdll::query = reinterpret_cast<ntdll::Query_t>(reinterpret_cast<void *>(
+			GetProcAddress(module, "NtQuerySystemInformation")));
+}
+
+// Fills out_usage[0..*out_count) with the usage of every logical core.
+static bool sample_core_usage(float *out_usage, int *out_count)
+{
+	*out_count = 0;
+	if (ntdll::query == nullptr)
+		return false;
+
+	const DWORD core_count = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+	if (core_count == 0 || core_count > kMaxCores)
+		return false;
+
+	ntdll::ProcessorPerformanceInfo info[kMaxCores];
+	ULONG returned = 0;
+	const LONG status = ntdll::query(ntdll::kSystemProcessorPerformanceInformation, info,
+		static_cast<ULONG>(sizeof(info[0]) * core_count), &returned);
+	if (status < 0)
+	{
+		g_prev_core_valid = false;
+		return false;
+	}
+
+	const uint32_t count = std::min<uint32_t>(returned / sizeof(info[0]), kMaxCores);
+	const bool valid = g_prev_core_valid;
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		const uint64_t idle_now = static_cast<uint64_t>(info[i].IdleTime.QuadPart);
+		const uint64_t total_now = static_cast<uint64_t>(info[i].KernelTime.QuadPart) +
+			static_cast<uint64_t>(info[i].UserTime.QuadPart);
+
+		if (valid && total_now > g_prev_core_total[i])
+		{
+			const double idle_delta = static_cast<double>(idle_now) - static_cast<double>(g_prev_core_idle[i]);
+			const double total_delta = static_cast<double>(total_now) - static_cast<double>(g_prev_core_total[i]);
+			out_usage[i] = static_cast<float>(std::clamp(100.0 - 100.0 * idle_delta / total_delta, 0.0, 100.0));
+		}
+		else
+		{
+			out_usage[i] = 0.0f;
+		}
+
+		g_prev_core_idle[i] = idle_now;
+		g_prev_core_total[i] = total_now;
+	}
+	g_prev_core_valid = true;
+
+	*out_count = static_cast<int>(count);
+	return valid;
+}
+
 // --------------------------------------------------------------- sampling
 
 static void update_snapshot()
@@ -567,16 +580,22 @@ static void update_snapshot()
 
 	// CPU usage via time deltas
 	next.cpu_usage_valid = sample_cpu_usage(&next.cpu_usage);
+	// Per-core usage is only sampled while "Show core usage" is enabled
+	if (g_show_core)
+	{
+		next.core_usage_valid = sample_core_usage(next.core_usage, &next.core_count);
+	}
+	else
+	{
+		g_prev_core_valid = false;
+	}
 
 	// Collect performance counter values once per interval, before reading them
 	const bool use_gpu_fallback = (g_nvml_device_count == 0 && g_pdh_gpu_available);
 	const bool use_gpu_memory_fallback = (g_nvml_device_count == 0 && g_pdh_gpu_mem_available);
-	if (g_pdh_cpu_power_available || g_pdh_cpu_temp_available || use_gpu_fallback || use_gpu_memory_fallback)
+	if (use_gpu_fallback || use_gpu_memory_fallback)
 		PdhCollectQueryData(g_pdh_query);
 
-	next.cpu_power_valid = sample_cpu_power(&next.cpu_power);
-	next.cpu_power_valid = (next.cpu_power_valid && next.cpu_power >= 0.0f);
-	next.cpu_temp_valid = sample_cpu_temp(&next.cpu_temp);
 	next.ram_usage_valid = sample_ram_usage(&next.ram_used_gb, &next.ram_free_gb);
 	next.battery_valid = sample_battery(&next.battery_percent);
 
@@ -845,6 +864,26 @@ static int mem_available_level(float free_gb)
 	return kLevelNone;
 }
 
+// Battery line: below 80% yellow, below 50% red
+static int battery_level(int percent)
+{
+	if (percent < 50)
+		return kLevelCritical;
+	if (percent < 80)
+		return kLevelWarning;
+	return kLevelNone;
+}
+
+// CPU/GPU usage lines: 60+ % yellow, 90+ % red (matches color_for_percent)
+static int usage_level(float percent)
+{
+	if (percent >= 90.0f)
+		return kLevelCritical;
+	if (percent >= 60.0f)
+		return kLevelWarning;
+	return kLevelNone;
+}
+
 // Temperature lines: above 70 C yellow, above 80 C red
 static int temperature_level(float celsius)
 {
@@ -879,6 +918,7 @@ static void draw_metric_placeholder(const char *label)
 	draw_metric_line(disabled_color, "...", label);
 }
 
+
 // Usage line carries the threshold coloring; other metrics are separate lines
 // below it in the same column.
 static void draw_usage_metric(const char *value, const char *label, float percent)
@@ -888,7 +928,11 @@ static void draw_usage_metric(const char *value, const char *label, float percen
 
 static void draw_cpu_lines(const StatsSnapshot &snapshot)
 {
-	if (g_show_cpu_usage)
+	// With "Show performance issues only", the usage line auto-shows when the
+	// CPU load reaches a warning level, even if "Show CPU usage" is off.
+	const bool cpu_usage_warning = (g_use_threshold_colors && snapshot.cpu_usage_valid &&
+		usage_level(snapshot.cpu_usage) > kLevelNone);
+	if (g_show_cpu_usage || cpu_usage_warning)
 	{
 		if (snapshot.cpu_usage_valid)
 		{
@@ -896,27 +940,29 @@ static void draw_cpu_lines(const StatsSnapshot &snapshot)
 			snprintf(value, sizeof(value), "%.0f%%", snapshot.cpu_usage);
 			draw_usage_metric(value, "cpu", snapshot.cpu_usage);
 		}
-		else
+		else if (g_show_cpu_usage)
 		{
 			draw_metric_placeholder("cpu");
 		}
 	}
 
-	if (g_show_power && snapshot.cpu_power_valid)
+	// One line per logical core, colored by load. Only when enabled.
+	if (g_show_core)
 	{
-		char value[16];
-		snprintf(value, sizeof(value), "%.0f", snapshot.cpu_power);
-		draw_metric_line(base_color(), value, "w");
-	}
-
-	if (g_show_cpu_temp || (g_use_threshold_colors && snapshot.cpu_temp_valid &&
-		temperature_level(snapshot.cpu_temp) > kLevelNone))
-	{
-		if (snapshot.cpu_temp_valid)
+		if (snapshot.core_usage_valid)
 		{
-			char value[16];
-			snprintf(value, sizeof(value), "%d", static_cast<int>(snapshot.cpu_temp + 0.5f));
-			draw_metric_line(level_color(temperature_level(snapshot.cpu_temp)), value, "c");
+			for (int i = 0; i < snapshot.core_count; ++i)
+			{
+				char value[16];
+				char label[16];
+				snprintf(value, sizeof(value), "%.0f%%", snapshot.core_usage[i]);
+				snprintf(label, sizeof(label), "core%d", i);
+				draw_usage_metric(value, label, snapshot.core_usage[i]);
+			}
+		}
+		else
+		{
+			draw_metric_placeholder("core");
 		}
 	}
 
@@ -936,11 +982,13 @@ static void draw_cpu_lines(const StatsSnapshot &snapshot)
 		}
 	}
 
-	if (g_show_battery && snapshot.battery_valid)
+	const bool show_battery_line = g_show_battery || (g_use_threshold_colors && snapshot.battery_valid &&
+		battery_level(snapshot.battery_percent) > kLevelNone);
+	if (show_battery_line && snapshot.battery_valid)
 	{
 		char value[16];
 		snprintf(value, sizeof(value), "%d%%", snapshot.battery_percent);
-		draw_metric_line(base_color(), value, "bat");
+		draw_metric_line(level_color(battery_level(snapshot.battery_percent)), value, "bat");
 	}
 }
 
@@ -954,8 +1002,6 @@ static FpsStats fps_stats_snapshot()
 
 static void draw_fps_lines(reshade::api::effect_runtime *)
 {
-	update_fps_stats();
-
 	const FpsStats stats = fps_stats_snapshot();
 
 	if (!stats.valid)
@@ -1081,6 +1127,9 @@ static void draw_osd(reshade::api::effect_runtime *)
 	StatsSnapshot snapshot = g_snapshot;
 	ReleaseSRWLockShared(&g_snapshot_lock);
 
+	// Stats must be refreshed here, not only when the FPS lines are drawn:
+	// otherwise a hidden FPS line never gets evaluated and never auto-shows.
+	update_fps_stats();
 	const FpsStats stats = fps_stats_snapshot();
 	const float scale = g_smooth_motion ? 2.0f : 1.0f;
 
@@ -1093,8 +1142,9 @@ static void draw_osd(reshade::api::effect_runtime *)
 			for (const float value : fps_values)
 				any_warning |= (fps_level(value) > kLevelNone);
 
-		any_warning |= (snapshot.cpu_temp_valid && temperature_level(snapshot.cpu_temp) > kLevelNone);
+		any_warning |= (snapshot.cpu_usage_valid && usage_level(snapshot.cpu_usage) > kLevelNone);
 		any_warning |= (snapshot.ram_usage_valid && mem_available_level(snapshot.ram_free_gb) > kLevelNone);
+		any_warning |= (snapshot.battery_valid && battery_level(snapshot.battery_percent) > kLevelNone);
 		for (int i = 0; i < snapshot.gpu_count && i < kMaxGpus; ++i)
 		{
 			const GpuSample &gpu = snapshot.gpus[i];
@@ -1104,8 +1154,8 @@ static void draw_osd(reshade::api::effect_runtime *)
 		}
 	}
 
-	if (!g_show_cpu_usage && !g_show_gpu_usage && !g_show_cpu_temp && !g_show_temp &&
-		!g_show_power && !g_show_vram && !g_show_ram && !g_show_fps && !g_show_battery && !any_warning)
+	if (!g_show_cpu_usage && !g_show_gpu_usage && !g_show_temp &&
+		!g_show_power && !g_show_vram && !g_show_ram && !g_show_fps && !g_show_battery && !g_show_core && !any_warning)
 		return;
 
 	// Scales the OSD text. PushFont(nullptr, FontSizeBase * scale) is the
@@ -1135,8 +1185,8 @@ static int g_interval_config = 1000;
 static void save_config(reshade::api::effect_runtime *runtime)
 {
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCPU", g_show_cpu_usage);
+	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCore", g_show_core);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowGPU", g_show_gpu_usage);
-	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCPUTemp", g_show_cpu_temp);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowGPUTemp", g_show_temp);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowPower", g_show_power);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowVram", g_show_vram);
@@ -1155,8 +1205,8 @@ static void save_config(reshade::api::effect_runtime *runtime)
 static void load_config()
 {
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowCPU", g_show_cpu_usage);
+	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowCore", g_show_core);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowGPU", g_show_gpu_usage);
-	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowCPUTemp", g_show_cpu_temp);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowGPUTemp", g_show_temp);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowPower", g_show_power);
 	reshade::get_config_value(nullptr, "PERFORMANCE_HUD", "ShowVram", g_show_vram);
@@ -1202,12 +1252,14 @@ static void load_config()
 static void draw_settings(reshade::api::effect_runtime *runtime)
 {
 	ImGui::SeparatorText("Metrics");
+	if (ImGui::Checkbox("Show performance issues only", &g_use_threshold_colors))
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
 	if (ImGui::Checkbox("Show CPU usage", &g_show_cpu_usage))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCPU", g_show_cpu_usage);
+	if (ImGui::Checkbox("Show core usage", &g_show_core))
+		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCore", g_show_core);
 	if (ImGui::Checkbox("Show GPU usage", &g_show_gpu_usage))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowGPU", g_show_gpu_usage);
-	if (ImGui::Checkbox("Show CPU temperature", &g_show_cpu_temp))
-		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowCPUTemp", g_show_cpu_temp);
 	if (ImGui::Checkbox("Show GPU temperature", &g_show_temp))
 		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ShowGPUTemp", g_show_temp);
 	if (ImGui::Checkbox("Show power draw", &g_show_power))
@@ -1237,9 +1289,6 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudScale", g_hud_scale);
 	reshade::set_config_value(runtime, "PERFORMANCE_HUD", "HudPosY", g_hud_pos_y);
 	}
-	if (ImGui::Checkbox("Color lines by load", &g_use_threshold_colors))
-		reshade::set_config_value(runtime, "PERFORMANCE_HUD", "ColorLinesByLoad", g_use_threshold_colors);
-	ImGui::TextDisabled("Enabling this option will display yellow parameters.");
 	if (ImGui::ColorEdit4("Base text color", g_hud_color))
 	{
 		char color_string[64];
@@ -1275,15 +1324,13 @@ static void draw_settings(reshade::api::effect_runtime *runtime)
 	else
 		ImGui::TextDisabled("NVML: no NVIDIA GPU found.");
 
-	if (g_pdh_cpu_power_available)
-		ImGui::TextDisabled("CPU package power counter is available.");
-	else
-		ImGui::TextDisabled("CPU package power counter is unavailable on this system.");
+	// Report live data, not just whether the counter was registered
+	StatsSnapshot snapshot;
+	AcquireSRWLockShared(&g_snapshot_lock);
+	snapshot = g_snapshot;
+	ReleaseSRWLockShared(&g_snapshot_lock);
 
-	if (g_pdh_cpu_temp_available)
-		ImGui::TextDisabled("CPU temperature counter is available.");
-	else
-		ImGui::TextDisabled("CPU temperature counter is unavailable on this system.");
+
 
 	ImGui::TextDisabled("GPU power and temperature require NVIDIA NVML (other GPUs report usage only).");
 }
@@ -1327,6 +1374,7 @@ static void init()
 	load_config();
 	load_nvml();
 	load_pdh();
+	load_ntdll();
 
 	reshade::register_overlay("OSD", &draw_osd);
 	reshade::register_overlay(nullptr, &draw_settings);
