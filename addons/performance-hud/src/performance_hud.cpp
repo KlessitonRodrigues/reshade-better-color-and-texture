@@ -864,12 +864,12 @@ static int mem_available_level(float free_gb)
 	return kLevelNone;
 }
 
-// Battery line: below 80% yellow, below 50% red
+// Battery line: below 50% yellow, below 30% red
 static int battery_level(int percent)
 {
-	if (percent < 50)
+	if (percent < 30)
 		return kLevelCritical;
-	if (percent < 80)
+	if (percent < 50)
 		return kLevelWarning;
 	return kLevelNone;
 }
