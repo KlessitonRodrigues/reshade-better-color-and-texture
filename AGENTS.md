@@ -34,6 +34,7 @@ reshade-better-color-and-texture/
     │   └── PerformanceHUD.addon64  # Prebuilt Performance HUD add-on binary
     ├── Shaders/                    # HLSL effects (.fx) and shared headers (.fxh)
     │   ├── ambient_v2.fx           # Ambient removal + contrast curve (DH_Ambient_Remove_V2)
+│   ├── ambient_v3.fx           # Ambient removal + contrast + anti-oversaturation saturation guard (DH_Ambient_Remove_V3)
     │   ├── Colourfulness_v3.fx     # Colourfulness + Vibrance variant (ColourfulnessV3)
     │   ├── light.fx                # CeeJay.dk Levels 1.2 - black/white point remap
     │   ├── qUINT_sharp.fx          # Marty McFly DELCS depth-enhanced local contrast sharpener
