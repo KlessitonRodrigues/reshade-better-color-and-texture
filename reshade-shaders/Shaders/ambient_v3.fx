@@ -45,7 +45,7 @@ namespace DH_Ambient_Remove_V3 {
         ui_category = "Strength per content";
         ui_label = "Vegetation strength";
         ui_tooltip = "Extra removal strength on green vegetation areas.\n1.0 = same as global, 0.0 = no removal on vegetation, >1.0 = stronger removal.";
-        ui_min = 0; ui_max = 2.0;
+        ui_min = 0; ui_max = 3.0;
         ui_step = 0.001;
     > = 1.0;
 
@@ -54,7 +54,7 @@ namespace DH_Ambient_Remove_V3 {
         ui_category = "Strength per content";
         ui_label = "Sky strength";
         ui_tooltip = "Extra removal strength on bright sky areas.\n1.0 = same as global, 0.0 = no removal on sky, >1.0 = stronger removal.";
-        ui_min = 0; ui_max = 2.0;
+        ui_min = 0; ui_max = 3.0;
         ui_step = 0.001;
     > = 1.0;
 

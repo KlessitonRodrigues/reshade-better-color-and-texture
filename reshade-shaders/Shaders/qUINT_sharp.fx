@@ -24,7 +24,7 @@ uniform float SHARP_STRENGTH <
     ui_type = "slider";
     ui_label = "Sharpen Strength";
     ui_min = 0.0;
-    ui_max = 1.0;
+    ui_max = 2.0;
 > = 0.7;
 
 uniform bool RMS_MASK_ENABLE <

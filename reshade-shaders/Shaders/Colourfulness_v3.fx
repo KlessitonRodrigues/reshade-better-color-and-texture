@@ -22,7 +22,7 @@
 
 uniform float vibrance <
     ui_type = "slider";
-    ui_min = 0.0; ui_max = 1.0;
+    ui_min = 0.0; ui_max = 2.0;
     ui_step = 0.01;
     ui_label = "Vibrance";
     ui_tooltip = "Gentle boost for muted colours. Does not raise the saturation ceiling.";
@@ -30,7 +30,7 @@ uniform float vibrance <
 
 uniform float max_saturation <
     ui_type = "slider";
-    ui_min = 0.1; ui_max = 1.0;
+    ui_min = 0.1; ui_max = 2.0;
     ui_step = 0.01;
     ui_label = "Max Saturation";
     ui_tooltip = "Saturation ceiling treated as the limit of realistic colour.";
@@ -38,7 +38,7 @@ uniform float max_saturation <
 
 uniform float softness <
     ui_type = "slider";
-    ui_min = 0.0; ui_max = 1.0;
+    ui_min = 0.0; ui_max = 2.0;
     ui_step = 0.01;
     ui_label = "Softness";
     ui_tooltip = "How early and gradually oversaturated colours are compressed. 0 = hard ceiling.";
@@ -46,7 +46,7 @@ uniform float softness <
 
 uniform float strength <
     ui_type = "slider";
-    ui_min = 0.0; ui_max = 1.0;
+    ui_min = 0.0; ui_max = 2.0;
     ui_step = 0.01;
     ui_label = "Strength";
     ui_tooltip = "Blend between the original image and the palette-limited result.";
