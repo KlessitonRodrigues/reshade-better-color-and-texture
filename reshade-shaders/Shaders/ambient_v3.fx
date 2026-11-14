@@ -9,7 +9,7 @@
 // Get more here : https://alucarddh.github.io
 // Join my Discord server for news, request, bug reports or help : https://discord.gg/V9HgyBRgMW
 //
-// V3 : adds per-content strength controls (global, vegetation, sky) on top of V2.
+// V3 : adds per-content strength controls (global, vegetation, sky, skin) on top of V2.
 //
 ////////////////////////////////////////////////////////////////////////////////////////////////
 #include "Reshade.fxh"
@@ -29,7 +29,7 @@ namespace DH_Ambient_Remove_V3 {
         ui_type = "color";
         ui_category = "Remove ambient light";
         ui_label = "Source Ambient light color";
-    > = float3(31.0,44.0,42.0)/255.0;
+    > = float3(230.0,255.0,255.0)/255.0;
 
     uniform float fSourceAmbientIntensity <
         ui_type = "slider";
@@ -54,6 +54,15 @@ namespace DH_Ambient_Remove_V3 {
         ui_category = "Strength per content";
         ui_label = "Sky strength";
         ui_tooltip = "Extra removal strength on bright sky areas.\n1.0 = same as global, 0.0 = no removal on sky, >1.0 = stronger removal.";
+        ui_min = 0; ui_max = 3.0;
+        ui_step = 0.001;
+    > = 1.0;
+
+    uniform float fSkinStrength <
+        ui_type = "slider";
+        ui_category = "Strength per content";
+        ui_label = "Skin strength";
+        ui_tooltip = "Extra removal strength on skin color areas.\n1.0 = same as global, 0.0 = no removal on skin, >1.0 = stronger removal.";
         ui_min = 0; ui_max = 3.0;
         ui_step = 0.001;
     > = 1.0;
@@ -98,6 +107,13 @@ namespace DH_Ambient_Remove_V3 {
         return saturate(bright * max(lowSat, blueDominance * 0.7));
     }
 
+    float skinMask(float3 color, float3 colorHSV) {
+        float hueMask = smoothstep(0.02, 0.06, colorHSV.x) * (1.0 - smoothstep(0.12, 0.20, colorHSV.x));
+        float satMask = smoothstep(0.05, 0.15, colorHSV.y) * (1.0 - smoothstep(0.45, 0.65, colorHSV.y));
+        float valueMask = smoothstep(0.15, 0.30, colorHSV.z) * (1.0 - smoothstep(0.90, 1.00, colorHSV.z));
+        return saturate(hueMask * satMask * valueMask);
+    }
+
     float3 filterAmbiantLight(float3 sourceColor) {
         float3 color = sourceColor;
         float3 colorHSV = RGBtoHSV(color);
@@ -112,6 +128,7 @@ namespace DH_Ambient_Remove_V3 {
         float strength = fSourceAmbientIntensity;
         strength *= lerp(1.0, fVegetationStrength, vegetationMask(color, colorHSV));
         strength *= lerp(1.0, fSkyStrength, skyMask(color, colorHSV));
+        strength *= lerp(1.0, fSkinStrength, skinMask(color, colorHSV));
         strength = saturate(strength);
 
         color -= removedTint*removal;
@@ -138,7 +155,7 @@ namespace DH_Ambient_Remove_V3 {
             "         version 0.4.0 by AlucardDH\n"
             "\n"
             "  Adds per-content strength controls:\n"
-            "  global, vegetation and sky.\n"
+            "  global, vegetation, sky and skin.\n"
             "\n"
             "_____________________________________________";
     > {
