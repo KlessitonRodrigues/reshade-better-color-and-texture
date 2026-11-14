@@ -80,7 +80,9 @@ namespace DH_Ambient_Remove_V3 {
 
     float3 applyContrast(float3 color) {
         float3 curved = color*color*(3.0-2.0*color);
-        return lerp(color, curved, fContrast);
+        float lum = dot(color, float3(0.2126, 0.7152, 0.0722));
+        float shadowMask = 1.0 - smoothstep(0.0, 0.5, lum);
+        return lerp(color, curved, fContrast * shadowMask);
     }
 
     float3 RGBtoHSV(float3 c) {
