@@ -21,6 +21,7 @@ jobs:
           tag="v${GITHUB_RUN_NUMBER}"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "zip_name=reshade-better-color-and-texture-${tag}.zip" >> "$GITHUB_OUTPUT"
+          git log -1 --pretty=format:"%s%n%n%b" > body.md
 
       - name: Create ZIP archive
         run: |
@@ -34,4 +35,4 @@ jobs:
           tag_name: ${{ steps.vars.outputs.tag }}
           name: ${{ steps.vars.outputs.tag }}
           files: ${{ steps.vars.outputs.zip_name }}
-          body: "Release ${{ steps.vars.outputs.tag }}"
+          body_path: body.md

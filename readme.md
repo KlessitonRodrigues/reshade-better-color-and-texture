@@ -26,17 +26,32 @@ This preset improves color, shadows, texture detail, and sharpness in supported 
 
 ## Performance HUD
 
-The preset includes a ReShade add-on (`reshade-shaders/Addons/PerformanceHUD.addon64`) that displays an always-visible on-screen HUD with:
+The preset includes a ReShade add-on (`reshade-shaders/Addons/PerformanceHUD.addon64`) that displays an always-visible on-screen HUD in a single column, one metric per line:
 
-- CPU usage (and CPU package power in watts when the system provides it)
-- GPU usage per adapter, with power draw and temperature on NVIDIA GPUs (via NVML)
-- On non-NVIDIA GPUs, usage is shown using Windows GPU engine counters (what Task Manager uses)
+- **FPS**: average FPS plus 1% and 0.1% lows over a rolling 10 second window (Smooth Motion option doubles the values for frame generation)
+- **CPU**: usage
+- **RAM**: used memory in GB
+- **GPU**: usage per adapter, VRAM used in GB, and power draw and temperature on NVIDIA GPUs (via NVML). Non-NVIDIA GPUs report usage and VRAM using Windows GPU counters (what Task Manager uses)
+- **Battery**: charge percentage on laptops
 
-Configure it under **Add-ons > Performance HUD** in the ReShade overlay (toggle lines, refresh interval). Usage turns amber above 60% and red above 90%.
+Settings are under the ReShade overlay (open with the ReShade menu key):
+
+- **Show performance issues only**: colors lines by load and auto-shows lines that are in a warning state
+- Toggle each metric, HUD scale, base text color (default `#FFFFFFFF`), HUD y offset and refresh interval (100 to 10000 ms)
+
+Warning thresholds:
+
+| Metric | Yellow | Red |
+| --- | --- | --- |
+| CPU / GPU usage | 60% and above | 90% and above |
+| FPS | below 60 | below 30 |
+| RAM / VRAM free | below 1 GB | below 0.5 GB |
+| GPU temperature | above 70 C | above 80 C |
+| Battery | below 80% | below 50% |
 
 Notes:
 
-- Requires a full ReShade installation (with add-on support) that includes the `AddonPath` handling; `ReShade.ini` in this repository already sets `[ADDON] AddonPath=.\reshade-shaders\Addons`.
+- Requires a full ReShade installation with add-on support; `ReShade.ini` in this repository already sets `[ADDON] AddonPath=.\reshade-shaders\Addons`.
 - Copy `reshade-shaders/Addons/PerformanceHUD.addon64` together with the other preset files next to the game executable for the HUD to load.
 - To change the HUD position, go to the ReShade settings: **Settings > Overlay > "OSD position on screen"**.
 

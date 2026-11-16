@@ -22,11 +22,11 @@
 
 uniform float vibrance <
     ui_type = "slider";
-    ui_min = 0.0; ui_max = 1.0;
+    ui_min = 0.0; ui_max = 2.0;
     ui_step = 0.01;
     ui_label = "Vibrance";
     ui_tooltip = "Gentle boost for muted colours. Does not raise the saturation ceiling.";
-> = 0.15;
+> = 1.0;
 
 uniform float max_saturation <
     ui_type = "slider";
