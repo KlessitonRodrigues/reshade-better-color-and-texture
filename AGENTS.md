@@ -22,7 +22,7 @@ reshade-better-color-and-texture/
 ├── .github/
 │   └── workflows/
 │       └── release.yml             # CI: zip repo and publish GitHub Release on push to main
-├── addons/
+├── src/
 │   └── performance-hud/            # "Performance HUD" ReShade add-on data source (CPU/GPU usage + power OSD)
 │       ├── build.sh                # Cross-build script (llvm-mingw), outputs PerformanceHUD.addon64
 │       ├── CMakeLists.txt          # CMake project (MSVC or mingw) for the same add-on
